@@ -12,7 +12,7 @@ from tkinter import filedialog, ttk
 from dataclasses import dataclass, field
 from typing import Optional
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 # ============ DATA STRUCTURES ============
@@ -186,6 +186,14 @@ def parse_dpcb(text):
 
     return b
 
+
+# ============ LAYER COLORS ============
+
+COLOR_FCU = '#ff8844'
+COLOR_BCU = '#4488ff'
+COLOR_VIA = '#88dd44'
+COLOR_PAD = '#d4aa00'
+COLOR_OUTLINE = '#444444'
 
 # ============ NET COLORS ============
 
@@ -561,35 +569,32 @@ class DPCBViewer:
             y1 = ty(fp.y - h / 2)
             x2 = tx(fp.x + w / 2)
             y2 = ty(fp.y + h / 2)
-            c.create_rectangle(x1, y1, x2, y2, outline='#444444', width=1)
+            c.create_rectangle(x1, y1, x2, y2, outline=COLOR_OUTLINE, width=1)
 
         # Tracks - B.Cu first
         if self.show_bcu:
             for trk in b.tracks:
                 if trk.layer != 'B.Cu':
                     continue
-                col = net_color(trk.net)
                 w = max(1, mm(trk.width))
                 c.create_line(tx(trk.x1), ty(trk.y1), tx(trk.x2), ty(trk.y2),
-                             fill=col, width=w, capstyle=tk.ROUND, dash=(4, 3))
+                             fill=COLOR_BCU, width=w, capstyle=tk.ROUND)
 
         # Tracks - F.Cu
         if self.show_fcu:
             for trk in b.tracks:
                 if trk.layer != 'F.Cu':
                     continue
-                col = net_color(trk.net)
                 w = max(1, mm(trk.width))
                 c.create_line(tx(trk.x1), ty(trk.y1), tx(trk.x2), ty(trk.y2),
-                             fill=col, width=w, capstyle=tk.ROUND)
+                             fill=COLOR_FCU, width=w, capstyle=tk.ROUND)
 
         # Vias
         for via in b.vias:
             cx, cy = tx(via.x), ty(via.y)
             r = max(2, mm(via.od / 2))
             ri = max(1, mm(via.id_ / 2))
-            col = net_color(via.net)
-            c.create_oval(cx - r, cy - r, cx + r, cy + r, fill='#333333', outline=col, width=1)
+            c.create_oval(cx - r, cy - r, cx + r, cy + r, fill='#333333', outline=COLOR_VIA, width=1)
             c.create_oval(cx - ri, cy - ri, cx + ri, cy + ri, fill='#060a10', outline='')
 
         # Pads
@@ -599,7 +604,7 @@ class DPCBViewer:
                     cx, cy = tx(pad.x), ty(pad.y)
                     r = max(2, mm(0.3))
                     c.create_oval(cx - r, cy - r, cx + r, cy + r,
-                                 fill='#d4aa00', outline='')
+                                 fill=COLOR_PAD, outline='')
                     # Pad numbers at high zoom
                     if s > 6:
                         c.create_text(cx, cy, text=str(pad.num),

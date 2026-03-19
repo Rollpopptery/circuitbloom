@@ -26,10 +26,12 @@ import socket
 import threading
 import traceback
 from dpcb_router import RouterGrid, route_by_name, GRID_PITCH
+from dpcb_router8 import route8_by_name
 from dpcb_pathset import RouteSet, tracks_to_dpcb_lines, KEEPOUT_NET_ID
 from via_check import check_vias, format_viacheck, DEFAULT_THRESHOLD_MM
 from crowding_check import check_crowding, format_crowding, DEFAULT_CLEARANCE_THRESHOLD_MM
 from discipline import prompt as discipline_prompt
+from dpcb_log import log as design_log
 
 
 class ApiServer:
@@ -171,6 +173,14 @@ class ApiServer:
                 return self._cmd_viacheck(parts[1:])
             elif cmd == 'check_crowding':
                 return self._cmd_check_crowding(parts[1:])
+            elif cmd == 'get_vias':
+                return self._cmd_get_vias()
+            elif cmd == 'get_transitions':
+                return self._cmd_get_transitions(parts[1:])
+            elif cmd == 'log_note':
+                return self._cmd_log_note(parts[1:])
+            elif cmd == 'unroute_seg':
+                return self._cmd_unroute_seg(parts[1:])
             elif cmd == 'discipline':
                 return self._cmd_discipline()
             elif cmd == 'quit':
@@ -186,9 +196,9 @@ class ApiServer:
     # ============ COMMANDS ============
 
     def _cmd_route(self, args):
-        """route <net> <x1,y1> <x2,y2> [F.Cu|B.Cu|auto] [margin=N]"""
+        """route <net> <x1,y1> <x2,y2> [F.Cu|B.Cu|auto] [margin=N] [use8]"""
         if len(args) < 3:
-            return "ERR: usage: route <net> <x1,y1> <x2,y2> [F.Cu|B.Cu|auto] [margin=N]"
+            return "ERR: usage: route <net> <x1,y1> <x2,y2> [F.Cu|B.Cu|auto] [margin=N] [use8]"
 
         net_name = args[0]
         try:
@@ -199,6 +209,7 @@ class ApiServer:
 
         layer_mode = 'auto'
         margin_override = None
+        use8 = False
         for a in args[3:]:
             if a in ('F.Cu', 'B.Cu', 'auto'):
                 layer_mode = a
@@ -207,13 +218,16 @@ class ApiServer:
                     margin_override = int(a.split('=', 1)[1])
                 except ValueError:
                     return "ERR: margin must be an integer (grid cells, e.g. margin=1)"
+            elif a == 'use8':
+                use8 = True
 
         grid, routeset = self._ensure_grid()
         if grid is None:
             return "ERR: no board loaded"
-        result = route_by_name(grid, net_name, x1, y1, x2, y2,
-                               layer_mode=layer_mode,
-                               margin_override=margin_override)
+        router_fn = route8_by_name if use8 else route_by_name
+        result = router_fn(grid, net_name, x1, y1, x2, y2,
+                           layer_mode=layer_mode,
+                           margin_override=margin_override)
 
         if result.success:
             net_id = grid.get_net_id(net_name)
@@ -240,8 +254,15 @@ class ApiServer:
 
             # Include waypoints in response
             wp_str = self._path_waypoints(path, grid)
-            return f"OK: {result.message}\n  path: {wp_str}"
+            resp = f"OK: {result.message}\n  path: {wp_str}"
+            use8_str = ' use8' if use8 else ''
+            margin_str = f' margin={margin_override}' if margin_override is not None else ''
+            self._log(f"route {net_name} {args[1]} {args[2]} {layer_mode}{margin_str}{use8_str} | {result.message}")
+            return resp
 
+        use8_str = ' use8' if use8 else ''
+        margin_str = f' margin={margin_override}' if margin_override is not None else ''
+        self._log(f"route {net_name} {args[1]} {args[2]} {layer_mode}{margin_str}{use8_str} | FAIL: {result.message}")
         return f"FAIL: {result.message}"
 
     def _cmd_unroute(self, args):
@@ -268,7 +289,72 @@ class ApiServer:
             self.routeset = None
 
         self._request_render()
+        self._log(f"unroute {net_name} | removed {removed} route(s)")
         return f"OK: unrouted {removed} route(s) for {net_name}"
+
+    def _cmd_unroute_seg(self, args):
+        """unroute_seg <net> <x1,y1> <x2,y2> [tolerance]
+        Remove track segment(s) matching net and endpoints within tolerance (mm).
+        Clears grid cells for removed segments. Does not remove vias.
+        """
+        if len(args) < 3:
+            return "ERR: usage: unroute_seg <net> <x1,y1> <x2,y2> [tolerance]"
+
+        net_name = args[0]
+        try:
+            x1, y1 = [float(v) for v in args[1].split(',')]
+            x2, y2 = [float(v) for v in args[2].split(',')]
+        except ValueError:
+            return "ERR: coordinates must be x,y"
+
+        tol = 0.15
+        if len(args) > 3:
+            try:
+                tol = float(args[3])
+            except ValueError:
+                pass
+
+        board = self.viewer.board
+        if not board:
+            return "ERR: no board loaded"
+
+        grid, routeset = self._ensure_grid()
+
+        def close(a, b):
+            return abs(a - b) <= tol
+
+        def match(t):
+            if t.net != net_name:
+                return False
+            fwd = close(t.x1, x1) and close(t.y1, y1) and close(t.x2, x2) and close(t.y2, y2)
+            rev = close(t.x1, x2) and close(t.y1, y2) and close(t.x2, x1) and close(t.y2, y1)
+            return fwd or rev
+
+        removed = [t for t in board.tracks if match(t)]
+        if not removed:
+            return f"ERR: no matching segment for {net_name} ({x1},{y1})->({x2},{y2}) tol={tol}"
+
+        # Clear grid cells for removed tracks
+        if grid:
+            from dpcb_router import LAYER_IDS, _line_cells
+            net_id = grid.get_net_id(net_name)
+            for t in removed:
+                layer = LAYER_IDS.get(t.layer, 0)
+                w = max(1, int(round(t.width / GRID_PITCH)))
+                gx1, gy1 = grid.mm_to_grid(t.x1, t.y1)
+                gx2, gy2 = grid.mm_to_grid(t.x2, t.y2)
+                cells = _line_cells(gx1, gy1, gx2, gy2)
+                hw = w // 2
+                for cx, cy in cells:
+                    for dy in range(-hw, hw + 1):
+                        for dx in range(-hw, hw + 1):
+                            grid.clear_cell(layer, cx + dx, cy + dy, net_id)
+
+        board.tracks = [t for t in board.tracks if not match(t)]
+
+        self._request_render()
+        self._log(f"unroute_seg {net_name} ({x1},{y1})->({x2},{y2}) | removed {len(removed)} seg(s)")
+        return f"OK: removed {len(removed)} segment(s) from {net_name}"
 
     def _cmd_load(self, args):
         """load <filename>"""
@@ -497,6 +583,7 @@ class ApiServer:
         grid.mark_via(x, y, net_id)
 
         self._request_render()
+        self._log(f"via {net_name} {x},{y} | placed od={od} id={id_}")
         return f"OK: via placed at ({x},{y}) net={net_name} od={od} id={id_}"
 
     def _cmd_viacheck(self, args):
@@ -548,6 +635,7 @@ class ApiServer:
                 grid.occupy[layer][grid.occupy[layer] == KEEPOUT_NET_ID] = 0
             self.keepouts_data = None
             n = self._load_keepouts_file(grid)
+            self._log(f"keepouts reload | {n} cells loaded")
             return f"OK: reloaded {n} keepout cells from file"
 
         elif sub == 'clear':
@@ -634,6 +722,7 @@ class ApiServer:
         self.routeset = None
 
         self._request_render()
+        self._log(f"move {ref} ({old_x},{old_y}):r{old_rot} -> ({fp.x},{fp.y}):r{fp.rotation}")
         return (f"OK: moved {ref} from ({old_x},{old_y}):r{old_rot} "
                 f"to ({fp.x},{fp.y}):r{fp.rotation}")
 
@@ -658,6 +747,71 @@ class ApiServer:
         return (f"OK: ({x},{y}) grid=({gx},{gy}) "
                 f"F.Cu={fcu} B.Cu={bcu} pad_keepout={in_keepout} pad_layer={pad_layer}")
 
+    def _cmd_get_vias(self):
+        """get_vias — list all vias with position and net."""
+        board = self.viewer.board
+        if not board:
+            return "ERR: no board loaded"
+        if not board.vias:
+            return "OK: 0 vias"
+        lines = [f"OK: {len(board.vias)} via(s)"]
+        for v in board.vias:
+            lines.append(f"  ({v.x},{v.y}) {v.net}")
+        return '\n'.join(lines)
+
+    def _cmd_get_transitions(self, args):
+        """get_transitions [tolerance] — find layer transitions in routes."""
+        board = self.viewer.board
+        if not board:
+            return "ERR: no board loaded"
+
+        tol = 0.15
+        if args:
+            try:
+                tol = float(args[0])
+            except ValueError:
+                return "ERR: tolerance must be a number in mm"
+
+        # Build endpoint sets per net per layer
+        from collections import defaultdict
+        endpoints = defaultdict(lambda: defaultdict(set))
+        for trk in board.tracks:
+            if not trk.net:
+                continue
+            endpoints[trk.net][trk.layer].add((round(trk.x1, 2), round(trk.y1, 2)))
+            endpoints[trk.net][trk.layer].add((round(trk.x2, 2), round(trk.y2, 2)))
+
+        # Find points where both layers have endpoints within tolerance
+        transitions = []
+        for net, layers in endpoints.items():
+            fcu = layers.get('F.Cu', set())
+            bcu = layers.get('B.Cu', set())
+            for fx, fy in fcu:
+                for bx, by in bcu:
+                    if abs(fx - bx) <= tol and abs(fy - by) <= tol:
+                        transitions.append((net, fx, fy))
+                        break
+
+        # Build via set for comparison
+        via_set = set()
+        for v in board.vias:
+            via_set.add((round(v.x, 2), round(v.y, 2)))
+
+        lines = [f"OK: {len(transitions)} transition(s)"]
+        for net, x, y in sorted(transitions, key=lambda t: (t[0], t[1], t[2])):
+            has_via = any(abs(x - vx) <= tol and abs(y - vy) <= tol for vx, vy in via_set)
+            status = "VIA" if has_via else "MISSING"
+            lines.append(f"  {status} ({x},{y}) {net}")
+        return '\n'.join(lines)
+
+    def _cmd_log_note(self, args):
+        """log_note <text> — write a free-form note to the design log."""
+        if not args:
+            return "ERR: usage: log_note <text>"
+        text = ' '.join(args)
+        self._log(f"NOTE: {text}")
+        return "OK: logged"
+
     def _cmd_discipline(self):
         return f"OK: {discipline_prompt()}"
 
@@ -673,6 +827,9 @@ class ApiServer:
                 "  pushout <net> [amount]\n"
                 "  clearkeepouts <net>\n"
                 "  keepouts reload|clear|save|status\n"
+                "  get_vias\n"
+                "  get_transitions [tolerance]\n"
+                "  log_note <text>\n"
                 "  move <ref> <x,y> [r<rot>]\n"
                 "  load <filename>\n"
                 "  save <filename>\n"
@@ -682,6 +839,13 @@ class ApiServer:
                 "  quit")
 
     # ============ INTERNAL ============
+
+    def _log(self, text):
+        """Log a design step to the board's .design.log file."""
+        path = getattr(self.viewer, 'board_path', None)
+        if path:
+            base, _ = os.path.splitext(path)
+            design_log(base, text)
 
     def _ensure_grid(self):
         """Build or return the router grid and routeset from current board state."""

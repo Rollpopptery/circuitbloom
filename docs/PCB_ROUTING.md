@@ -166,7 +166,7 @@ Do NOT use fixed-delay sleeps to guess when a response is finished.
 ### route
 
 ```
-route <net> <x1,y1> <x2,y2> [F.Cu|B.Cu|auto] [margin=N]
+route <net> <x1,y1> <x2,y2> [F.Cu|B.Cu|auto] [margin=N] [use8]
 ```
 
 Route a track from (x1,y1) to (x2,y2) for the named net.
@@ -184,6 +184,12 @@ Margin (optional):
 - Default is 1 cell (0.1mm) if not specified
 - Higher values force more clearance from foreign-net tracks
 - Example: `margin=3` gives 0.3mm clearance from existing tracks
+
+8-direction routing (optional):
+- `use8` — use 8-direction A* router (dpcb_router8.py) instead of
+  the default 4-direction router. Enables diagonal (45°) movement
+  for beveled corners and shorter paths. Diagonal cost = √2.
+  Same grid, same clearance model, same keepout zones.
 
 Response:
 ```
@@ -216,6 +222,27 @@ Frees the grid cells so other nets can use the space.
 Response:
 ```
 OK: unrouted 3 path(s) for /clk
+```
+
+### unroute_seg
+
+```
+unroute_seg <net> <x1,y1> <x2,y2> [tolerance]
+```
+
+Remove a specific track segment matching net and endpoints.
+Matches by endpoint proximity (default tolerance 0.15mm).
+Clears grid cells for the removed segment. Does not remove vias
+or other segments on the same net.
+
+Use this to surgically replace individual segments within complex
+nets (e.g. beveling an L-shape in GND) without rebuilding the
+entire net.
+
+Response:
+```
+OK: removed 1 segment(s) from GND
+ERR: no matching segment for GND (14.6,48.6)->(14.6,48.7) tol=0.15
 ```
 
 ### status
@@ -377,6 +404,59 @@ File format: CSV, one grid cell per line. Comments start with `#`.
 Typical use: define exclusion zones around IC bodies and pad approach
 channels to prevent routes from cutting through component packages.
 These are manual courtyard/body exclusions on the routing grid.
+
+### log_note
+
+```
+log_note <text>
+```
+
+Write a free-form note to `<board>.design.log`. Use this to record
+routing reasoning — why a net was ripped up, why a component was moved,
+what strategy is being attempted. The same log file automatically
+captures route, unroute, via, and move actions with their results.
+
+Response:
+```
+OK: logged
+```
+
+
+### get_vias
+
+```
+get_vias
+```
+
+List all vias on the board with position and net.
+
+Response:
+```
+OK: 33 via(s)
+  (34.0,21.0) /sr1_qp5
+  (82.0,11.825) /oe
+  ...
+```
+
+### get_transitions
+
+```
+get_transitions [tolerance]
+```
+
+Find all layer transitions in routes — points where F.Cu and B.Cu
+tracks on the same net share an endpoint. Each transition is marked
+VIA (via exists) or MISSING (no via at that point). Default tolerance
+0.15mm.
+
+Use this to audit the board for missing vias after routing.
+
+Response:
+```
+OK: 16 transition(s)
+  VIA (34.0,21.0) /sr1_qp5
+  MISSING (83.0,52.0) GND
+```
 
 
 ## ROUTING STRATEGY
