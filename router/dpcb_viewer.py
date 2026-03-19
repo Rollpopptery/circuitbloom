@@ -12,7 +12,7 @@ from tkinter import filedialog, ttk
 from dataclasses import dataclass, field
 from typing import Optional
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 
 # ============ DATA STRUCTURES ============
@@ -352,7 +352,7 @@ class DPCBViewer:
         self.net_listbox.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
 
         # Status bar
-        self.status = tk.Label(self.root, text="Ready", font=("Courier", 9),
+        self.status = tk.Label(self.root, text="Ready", font=("Courier", 18),
                                bg='#111822', fg='#5c6a7a', anchor=tk.W, padx=10)
         self.status.pack(fill=tk.X, side=tk.BOTTOM)
 
