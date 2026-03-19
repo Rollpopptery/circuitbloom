@@ -175,13 +175,9 @@ class RouterGrid:
         # pad_r + margin < min_pad_pitch (TSSOP = 6.5 cells).
         pad_r = 4
         for fp in board.footprints:
-            # Determine pad layers: SMD = F.Cu only, through-hole = both
-            is_smd = ('_SMD' in fp.lib or 'Package_SO' in fp.lib or
-                      'SOIC' in fp.footprint or 'TSSOP' in fp.footprint or
-                      'QFP' in fp.footprint or 'BGA' in fp.footprint)
-            pad_layer = 0 if is_smd else None  # None = both layers (through-hole)
-
             for pad in fp.abs_pads:
+                is_th = getattr(pad, 'pad_type', 'th') == 'th'
+                pad_layer = None if is_th else 0  # None = both layers (through-hole), 0 = F.Cu only (SMD)
                 # Both pad.num and net.pads pin are int
                 nid = pad_net.get((fp.ref, pad.num), 0)
                 # Pads not in any net (nid=0) should block as obstacles (-1)
@@ -197,7 +193,7 @@ class RouterGrid:
                         if dx * dx + dy * dy <= via_keepout_r * via_keepout_r:
                             self.pad_keepout.add((gx + dx, gy + dy))
                 # Mark pad on appropriate layers
-                layers_to_mark = [0] if is_smd else [0, 1]
+                layers_to_mark = [0, 1] if is_th else [0]
                 for layer in layers_to_mark:
                     self.mark_pad(pad.x, pad.y, pad_r, layer, nid)
 

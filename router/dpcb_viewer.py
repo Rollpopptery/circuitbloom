@@ -29,12 +29,14 @@ class Pad:
     num: int
     dx: float
     dy: float
+    pad_type: str = 'th'  # 'th' (through-hole, both layers) or 'smd' (single layer)
 
 @dataclass
 class AbsPad:
     num: int
     x: float
     y: float
+    pad_type: str = 'th'
 
 @dataclass
 class Footprint:
@@ -85,10 +87,11 @@ class Board:
 # ============ PARSER ============
 
 def rotate_pad(dx, dy, angle_deg):
+    """Rotate pad offset using KiCad's CLOCKWISE convention (Y-down screen space)."""
     a = math.radians(angle_deg)
     cos_a = math.cos(a)
     sin_a = math.sin(a)
-    return dx * cos_a - dy * sin_a, dx * sin_a + dy * cos_a
+    return dx * cos_a + dy * sin_a, -dx * sin_a + dy * cos_a
 
 def parse_dpcb(text):
     b = Board()
@@ -138,11 +141,12 @@ def parse_dpcb(text):
                 key = m.group(2)
                 pad_str = m.group(3)
                 pads = []
-                for pm in re.finditer(r'(\d+)@\(([^,]+),([^)]+)\)', pad_str):
+                for pm in re.finditer(r'(\d+)@\(([^,]+),([^)]+)\)(?::(th|smd))?', pad_str):
                     pads.append(Pad(
                         num=int(pm.group(1)),
                         dx=float(pm.group(2)),
-                        dy=float(pm.group(3))
+                        dy=float(pm.group(3)),
+                        pad_type=pm.group(4) if pm.group(4) else 'th'
                     ))
                 b.pad_defs[key] = pads
 
@@ -182,7 +186,7 @@ def parse_dpcb(text):
         fp.abs_pads = []
         for pad in pad_def:
             rx, ry = rotate_pad(pad.dx, pad.dy, fp.rotation)
-            fp.abs_pads.append(AbsPad(num=pad.num, x=fp.x + rx, y=fp.y + ry))
+            fp.abs_pads.append(AbsPad(num=pad.num, x=fp.x + rx, y=fp.y + ry, pad_type=pad.pad_type))
 
     return b
 
@@ -192,7 +196,8 @@ def parse_dpcb(text):
 COLOR_FCU = '#ff8844'
 COLOR_BCU = '#4488ff'
 COLOR_VIA = '#88dd44'
-COLOR_PAD = '#d4aa00'
+COLOR_PAD_SMD = '#d4aa00'
+COLOR_PAD_TH = '#00d4aa'
 COLOR_OUTLINE = '#444444'
 
 # ============ NET COLORS ============
@@ -603,8 +608,9 @@ class DPCBViewer:
                 for pad in fp.abs_pads:
                     cx, cy = tx(pad.x), ty(pad.y)
                     r = max(2, mm(0.3))
+                    pad_color = COLOR_PAD_TH if getattr(pad, 'pad_type', 'th') == 'th' else COLOR_PAD_SMD
                     c.create_oval(cx - r, cy - r, cx + r, cy + r,
-                                 fill=COLOR_PAD, outline='')
+                                 fill=pad_color, outline='')
                     # Pad numbers at high zoom
                     if s > 6:
                         c.create_text(cx, cy, text=str(pad.num),

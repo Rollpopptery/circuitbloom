@@ -21,10 +21,11 @@ import time
 # ============ DPCB PARSING (minimal, just for pad positions) ============
 
 def rotate_pad(dx, dy, angle_deg):
+    """Rotate pad offset using KiCad's CLOCKWISE convention (Y-down screen space)."""
     a = math.radians(angle_deg)
     cos_a = round(math.cos(a), 6)
     sin_a = round(math.sin(a), 6)
-    return round(dx * cos_a - dy * sin_a, 4), round(dx * sin_a + dy * cos_a, 4)
+    return round(dx * cos_a + dy * sin_a, 4), round(-dx * sin_a + dy * cos_a, 4)
 
 
 def parse_board(path):

@@ -23,11 +23,11 @@ import re
 import argparse
 from pathlib import Path
 
-# Viewport offset — must match gen_pcb.py
+# Viewport offset — set dynamically from Edge.Cuts origin
 # Coordinates in .dpcb are board-relative (0,0 = board corner)
 # gen_pcb.py adds this offset when writing to .kicad_pcb
-VIEWPORT_X = 120.0
-VIEWPORT_Y = 65.0
+VIEWPORT_X = 0.0
+VIEWPORT_Y = 0.0
 
 
 def pcb_to_board(x, y):
@@ -137,6 +137,7 @@ def extract_footprints(tree, nets):
         abs_y = float(at_node[2])
         x, y = pcb_to_board(abs_x, abs_y)
         rotation = float(at_node[3]) if len(at_node) > 3 else 0
+        rotation = rotation % 360  # normalize negative rotations (e.g. -90 -> 270)
 
         # Get reference
         ref = "?"
@@ -153,15 +154,16 @@ def extract_footprints(tree, nets):
                 value = unquote(prop[2])
                 break
 
-        # Extract pad offsets
+        # Extract pad offsets and type (thru_hole or smd)
         pads = {}
         for pad_node in find_nodes(fp_node, 'pad'):
             pad_num = unquote(pad_node[1])
+            pad_type = unquote(pad_node[2]) if len(pad_node) > 2 else 'smd'
             pad_at = find_node(pad_node, 'at')
             if pad_at:
                 pad_x = float(pad_at[1])
                 pad_y = float(pad_at[2])
-                pads[pad_num] = (pad_x, pad_y)
+                pads[pad_num] = (pad_x, pad_y, 'th' if pad_type == 'thru_hole' else 'smd')
 
         footprints.append({
             'ref': ref,
@@ -277,7 +279,8 @@ def extract_zones(tree, nets):
 
 
 def extract_board_outline(tree):
-    """Try to find board outline from Edge.Cuts layer graphics."""
+    """Try to find board outline from Edge.Cuts layer graphics.
+    Returns (width, height, origin_x, origin_y) or (None, None, None, None)."""
     # Look for gr_rect or gr_line on Edge.Cuts
     lines = []
     for node in find_nodes(tree, 'gr_rect'):
@@ -290,7 +293,9 @@ def extract_board_outline(tree):
                 x2, y2 = float(end_node[1]), float(end_node[2])
                 w = round(abs(x2 - x1), 2)
                 h = round(abs(y2 - y1), 2)
-                return w, h
+                ox = round(min(x1, x2), 4)
+                oy = round(min(y1, y2), 4)
+                return w, h, ox, oy
 
     for node in find_nodes(tree, 'gr_line'):
         layer_node = find_node(node, 'layer')
@@ -309,9 +314,11 @@ def extract_board_outline(tree):
         all_y = [l[1] for l in lines] + [l[3] for l in lines]
         w = round(max(all_x) - min(all_x), 2)
         h = round(max(all_y) - min(all_y), 2)
-        return w, h
+        ox = round(min(all_x), 4)
+        oy = round(min(all_y), 4)
+        return w, h, ox, oy
 
-    return None, None
+    return None, None, None, None
 
 
 def count_layers(tree):
@@ -360,7 +367,7 @@ def format_dpcb(board_w, board_h, layer_count, footprints, pad_nets, tracks, via
             seen_libs[fp['lib']] = fp['pads']
     for lib in sorted(seen_libs.keys()):
         pads = seen_libs[lib]
-        pad_strs = [f"{num}@({pads[num][0]},{pads[num][1]})" for num in sorted(pads.keys(), key=lambda n: int(n) if n.isdigit() else n)]
+        pad_strs = [f"{num}@({pads[num][0]},{pads[num][1]}):{pads[num][2]}" for num in sorted(pads.keys(), key=lambda n: int(n) if n.isdigit() else n)]
         lines.append(f"PADS:{lib}:{','.join(pad_strs)}")
     lines.append("")
 
@@ -414,10 +421,15 @@ def main():
     # Parse
     tree = parse_file(text)
 
-    # Extract
+    # Extract board outline first to set viewport origin
+    board_w, board_h, origin_x, origin_y = extract_board_outline(tree)
+    global VIEWPORT_X, VIEWPORT_Y
+    if origin_x is not None and origin_y is not None:
+        VIEWPORT_X = origin_x
+        VIEWPORT_Y = origin_y
+
     nets = extract_nets(tree)
     layer_count = count_layers(tree)
-    board_w, board_h = extract_board_outline(tree)
     footprints, pad_nets = extract_footprints(tree, nets)
     tracks = extract_tracks(tree, nets)
     vias = extract_vias(tree, nets)

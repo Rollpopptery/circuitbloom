@@ -707,15 +707,12 @@ class ApiServer:
         fp.rotation = rot
 
         # Recompute absolute pad positions
-        import math
+        from dpcb_viewer import AbsPad, rotate_pad
         pad_def = board.pad_defs.get(fp.footprint, [])
         fp.abs_pads = []
         for pad in pad_def:
-            a = math.radians(fp.rotation)
-            rx = pad.dx * math.cos(a) - pad.dy * math.sin(a)
-            ry = pad.dx * math.sin(a) + pad.dy * math.cos(a)
-            from dpcb_viewer import AbsPad
-            fp.abs_pads.append(AbsPad(num=pad.num, x=fp.x + rx, y=fp.y + ry))
+            rx, ry = rotate_pad(pad.dx, pad.dy, fp.rotation)
+            fp.abs_pads.append(AbsPad(num=pad.num, x=fp.x + rx, y=fp.y + ry, pad_type=pad.pad_type))
 
         # Invalidate grid — will rebuild on next command
         self.grid = None

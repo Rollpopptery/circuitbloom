@@ -45,12 +45,3 @@ For design rule questions:
         docs/                   — all documentation (see READ FIRST)
 ```
 
-
-## ENVIRONMENT
-
-Running inside Docker container:
-- /workspace   = ~/projects/pcb_design/ on host (mounted)
-- /tmp/kicad   = host KiCad IPC socket (mounted)
-
-KiCad 9 runs on the host. Human watches it live.
-See PCB_PIPELINE.md for full environment and workflow details.
