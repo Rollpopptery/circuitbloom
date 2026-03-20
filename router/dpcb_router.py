@@ -32,6 +32,7 @@ class RouteResult:
     via_count: int = 0
     segment_count: int = 0
     message: str = ""
+    tap_point: tuple = None  # (x_mm, y_mm) where route tapped into existing trace
 
 class RouterGrid:
     """
@@ -114,6 +115,14 @@ class RouterGrid:
                 dilated |= ko_dilated
             else:
                 dilated |= keepout
+
+            # Unmask same-net cells — dilation from foreign nets must not
+            # block cells that belong to the routing net itself.
+            # Without this, a foreign trace near a same-net pad dilates
+            # into the pad area, preventing the router from reaching its
+            # own pad.
+            same_net = (occ == net_id)
+            dilated &= ~same_net
 
             blocked[layer] = dilated
         return blocked
@@ -401,6 +410,166 @@ def _count_segments(path):
         if dx != pdx or dy != pdy:
             count += 1
     return count
+
+
+def route_tap(grid, x1_mm, y1_mm, net_id,
+              layer_mode='auto', via_cost=30, track_width_cells=2,
+              start_layer=None, margin_override=None):
+    """Route from a pad to the nearest existing trace on the same net.
+
+    Like route() but the goal is any existing same-net cell on the grid
+    that is NOT flood-connected to the start pad. Uses Dijkstra (h=0)
+    since there's no single target point.
+    """
+    gx1, gy1 = grid.mm_to_grid(x1_mm, y1_mm)
+
+    if not grid.in_bounds(gx1, gy1):
+        return RouteResult(False, message="Start out of bounds")
+
+    if layer_mode == 'F.Cu':
+        allowed = {0}
+    elif layer_mode == 'B.Cu':
+        allowed = {1}
+    else:
+        allowed = {0, 1}
+
+    start_layers = {start_layer} if start_layer is not None else allowed
+
+    margin = margin_override if margin_override is not None else 1
+    blocked = grid.build_blocked_grid(net_id, margin)
+
+    W, H = grid.width, grid.height
+
+    # Find cells already connected to the start pad (flood)
+    start_flood = _flood_same_net(grid, net_id, gx1, gy1, start_layers & allowed)
+
+    # Check there are same-net cells NOT in the start flood (i.e. existing traces to tap into)
+    has_target = False
+    for layer in range(2):
+        if layer not in allowed:
+            continue
+        if np.any((grid.occupy[layer] == net_id) & ~np.isin(
+                np.arange(H * W).reshape(H, W) // W * W + np.arange(W),
+                [gy * W + gx for gx, gy, l in start_flood if l == layer])):
+            has_target = True
+            break
+
+    # Simpler check: just verify there are same-net cells on the grid
+    # that aren't in our flood
+    flood_set = start_flood
+    if not flood_set:
+        flood_set = {(gx1, gy1, sl) for sl in start_layers if sl in allowed}
+
+    counter = 0
+    open_set = []
+    g_score = {}
+    came_from = {}
+
+    for sgx, sgy, sl in flood_set:
+        if not blocked[sl][sgy, sgx]:
+            key = (sgx, sgy, sl)
+            if key not in g_score:
+                g_score[key] = 0
+                heapq.heappush(open_set, (0, counter, sgx, sgy, sl))
+                counter += 1
+
+    max_iter = 50000
+    goal_key = None
+    goal_mm = None
+    iterations = 0
+    best_dist = float('inf')
+    best_cell = (gx1, gy1, 0)
+
+    while open_set and iterations < max_iter:
+        iterations += 1
+        f, _, cx, cy, cl = heapq.heappop(open_set)
+        ck = (cx, cy, cl)
+
+        # Goal: any same-net cell NOT in our start flood
+        if grid.occupy[cl][cy, cx] == net_id and ck not in flood_set:
+            goal_key = ck
+            goal_mm = grid.grid_to_mm(cx, cy)
+            break
+
+        cg = g_score.get(ck)
+        if cg is None or f > cg + 1:
+            continue
+
+        # Track best cell (closest to any same-net cell)
+        if cg < best_dist:
+            best_dist = cg
+            best_cell = (cx, cy, cl)
+
+        # 4 neighbours
+        for nx, ny in ((cx+1, cy), (cx-1, cy), (cx, cy+1), (cx, cy-1)):
+            if nx < 0 or ny < 0 or nx >= W or ny >= H:
+                continue
+            # Allow entering same-net cells (that's our goal)
+            if blocked[cl][ny, nx] and grid.occupy[cl][ny, nx] != net_id:
+                continue
+            ng = cg + 1
+            nk = (nx, ny, cl)
+            old = g_score.get(nk)
+            if old is None or ng < old:
+                g_score[nk] = ng
+                heapq.heappush(open_set, (ng, counter, nx, ny, cl))
+                counter += 1
+                came_from[nk] = ck
+
+        # Via
+        if len(allowed) > 1:
+            ol = 1 - cl
+            via_allowed = not blocked[ol][cy, cx] and (cx, cy) not in grid.pad_keepout
+            if via_allowed:
+                ng = cg + via_cost
+                vk = (cx, cy, ol)
+                old = g_score.get(vk)
+                if old is None or ng < old:
+                    g_score[vk] = ng
+                    heapq.heappush(open_set, (ng, counter, cx, cy, ol))
+                    counter += 1
+                    came_from[vk] = ck
+
+    if goal_key is None:
+        bx, by, bl = best_cell
+        bx_mm, by_mm = grid.grid_to_mm(bx, by)
+        bl_name = LAYER_NAMES.get(bl, str(bl))
+        return RouteResult(False, message=f"No path to net ({iterations} iters) — closest: {bl_name} ({bx_mm},{by_mm})")
+
+    # Reconstruct
+    path = []
+    key = goal_key
+    while key is not None:
+        path.append(key)
+        key = came_from.get(key)
+    path.reverse()
+
+    via_count = sum(1 for i in range(1, len(path)) if path[i-1][2] != path[i][2])
+    length_cells = sum(abs(path[i][0]-path[i-1][0]) + abs(path[i][1]-path[i-1][1])
+                       for i in range(1, len(path)) if path[i-1][2] == path[i][2])
+    length_mm = length_cells * GRID_PITCH
+    seg_count = _count_segments(path)
+
+    return RouteResult(
+        success=True, path=path,
+        length_mm=length_mm, via_count=via_count,
+        segment_count=seg_count,
+        message=f"Tapped: {length_mm:.1f}mm, {via_count} vias, {seg_count} segs",
+        tap_point=goal_mm
+    )
+
+
+def route_tap_by_name(grid, net_name, x1_mm, y1_mm,
+                      layer_mode='auto', margin_override=None):
+    nid = grid.get_net_id(net_name)
+    if not nid:
+        return RouteResult(False, message=f"Unknown net: {net_name}")
+    gx1, gy1 = grid.mm_to_grid(x1_mm, y1_mm)
+    start_layer = grid.pad_layers.get((gx1, gy1))
+    return route_tap(grid, x1_mm, y1_mm, nid,
+                     layer_mode=layer_mode,
+                     start_layer=start_layer,
+                     margin_override=margin_override)
 
 
 def route_by_name(grid, net_name, x1_mm, y1_mm, x2_mm, y2_mm,

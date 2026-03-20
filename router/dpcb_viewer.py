@@ -11,6 +11,7 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 from dataclasses import dataclass, field
 from typing import Optional
+from mst import mst_edges
 
 __version__ = "0.3.1"
 
@@ -633,10 +634,16 @@ class DPCBViewer:
         b = self.board
         fp_map = {fp.ref: fp for fp in b.footprints}
 
+        # Build set of track endpoints per net for connectivity check
+        net_track_pts = {}
+        tol = 0.15
+        for t in b.tracks:
+            pts = net_track_pts.setdefault(t.net, set())
+            # Round to grid pitch for matching
+            pts.add((round(t.x1, 1), round(t.y1, 1)))
+            pts.add((round(t.x2, 1), round(t.y2, 1)))
+
         for net in b.nets:
-            # Skip nets that have tracks
-            if any(t.net == net.name for t in b.tracks):
-                continue
             positions = []
             for ref, pin in net.pads:
                 fp = fp_map.get(ref)
@@ -648,11 +655,26 @@ class DPCBViewer:
                         break
             if len(positions) < 2:
                 continue
+
+            # Check which pads have tracks nearby
+            track_pts = net_track_pts.get(net.name, set())
+            def pad_has_track(px, py):
+                rpx, rpy = round(px, 1), round(py, 1)
+                for dx in (-0.1, 0.0, 0.1):
+                    for dy in (-0.1, 0.0, 0.1):
+                        if (round(rpx + dx, 1), round(rpy + dy, 1)) in track_pts:
+                            return True
+                return False
+
             col = net_color(net.name)
-            for i in range(1, len(positions)):
+            labeled = [(str(i), x, y) for i, (x, y) in enumerate(positions)]
+            edges = mst_edges(labeled)
+            for (_, x1, y1), (_, x2, y2) in edges:
+                # Skip if both pads have tracks (likely connected)
+                if pad_has_track(x1, y1) and pad_has_track(x2, y2):
+                    continue
                 self.canvas.create_line(
-                    tx(positions[i - 1][0]), ty(positions[i - 1][1]),
-                    tx(positions[i][0]), ty(positions[i][1]),
+                    tx(x1), ty(y1), tx(x2), ty(y2),
                     fill=col, width=1, dash=(2, 4))
 
 

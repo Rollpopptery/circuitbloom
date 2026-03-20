@@ -22,6 +22,9 @@ For routing work, also read:
 - utilities/docs/PCB_ROUTING.md
 - utilities/docs/PCB_KEEPOUTS.md
 
+For API command reference:
+- utilities/docs/PCB_API.md              — all viewer TCP commands
+
 For design rule questions:
 - utilities/docs/PCB_DESIGN_RULES.md
 
@@ -41,6 +44,7 @@ For design rule questions:
         distill_sch.py          — .kicad_sch → .dsch
         gen_sch.py              — .dsch → .kicad_sch
         kicad_pin_atlas.json    — pin offsets for all KiCad symbols
+        cmd.py                  — CLI helper: send single command to viewer API
         checks/                 — check modules used by check_dpcb.py
         docs/                   — all documentation (see READ FIRST)
 ```

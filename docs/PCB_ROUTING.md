@@ -459,6 +459,10 @@ OK: 16 transition(s)
 ```
 
 
+See PCB_API.md for placement analysis commands: check_crowding_pads,
+check_ratsnest, force, repulsion.
+
+
 ## ROUTING STRATEGY
 
 The AI decides strategy. The router executes geometry.

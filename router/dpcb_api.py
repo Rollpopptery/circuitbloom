@@ -25,11 +25,16 @@ import os
 import socket
 import threading
 import traceback
-from dpcb_router import RouterGrid, route_by_name, GRID_PITCH
+from dpcb_router import RouterGrid, route_by_name, route_tap_by_name, GRID_PITCH, _flood_same_net
 from dpcb_router8 import route8_by_name
 from dpcb_pathset import RouteSet, tracks_to_dpcb_lines, KEEPOUT_NET_ID
 from via_check import check_vias, format_viacheck, DEFAULT_THRESHOLD_MM
 from crowding_check import check_crowding, format_crowding, DEFAULT_CLEARANCE_THRESHOLD_MM
+from pad_crowding_check import check_pad_crowding, format_pad_crowding, DEFAULT_PAD_THRESHOLD_MM
+from ratsnest_check import check_ratsnest, format_ratsnest, DEFAULT_RATSNEST_THRESHOLD_MM
+from force_check import compute_force, compute_force_all, format_force, format_force_all
+from repulsion_check import compute_repulsion, compute_repulsion_all, format_repulsion, format_repulsion_all, DEFAULT_REPULSION_THRESHOLD_MM
+from pad_pressure import compute_pressure, compute_pressure_all, format_pressure, format_pressure_all, DEFAULT_PRESSURE_THRESHOLD_MM
 from discipline import prompt as discipline_prompt
 from dpcb_log import log as design_log
 
@@ -143,6 +148,8 @@ class ApiServer:
         try:
             if cmd == 'route':
                 return self._cmd_route(parts[1:])
+            elif cmd == 'route_tap':
+                return self._cmd_route_tap(parts[1:])
             elif cmd == 'unroute':
                 return self._cmd_unroute(parts[1:])
             elif cmd == 'load':
@@ -173,6 +180,16 @@ class ApiServer:
                 return self._cmd_viacheck(parts[1:])
             elif cmd == 'check_crowding':
                 return self._cmd_check_crowding(parts[1:])
+            elif cmd == 'check_crowding_pads':
+                return self._cmd_check_crowding_pads(parts[1:])
+            elif cmd == 'check_ratsnest':
+                return self._cmd_check_ratsnest(parts[1:])
+            elif cmd == 'force':
+                return self._cmd_force(parts[1:])
+            elif cmd == 'repulsion':
+                return self._cmd_repulsion(parts[1:])
+            elif cmd == 'pressure':
+                return self._cmd_pressure(parts[1:])
             elif cmd == 'get_vias':
                 return self._cmd_get_vias()
             elif cmd == 'get_transitions':
@@ -248,7 +265,8 @@ class ApiServer:
             dst_pad = (path[-1][0], path[-1][1], path[-1][2])
             tw = self.viewer.board.rules.track if self.viewer.board else 0.2
             rid, output = routeset.add_route(net_id, src_pad, dst_pad, path, grid,
-                                             track_width_mm=tw)
+                                             track_width_mm=tw,
+                                             start_mm=(x1, y1), end_mm=(x2, y2))
             self._apply_track_output(net_name, output)
             self._request_render()
 
@@ -263,6 +281,60 @@ class ApiServer:
         use8_str = ' use8' if use8 else ''
         margin_str = f' margin={margin_override}' if margin_override is not None else ''
         self._log(f"route {net_name} {args[1]} {args[2]} {layer_mode}{margin_str}{use8_str} | FAIL: {result.message}")
+        return f"FAIL: {result.message}"
+
+    def _cmd_route_tap(self, args):
+        """route_tap <net> <x,y> [F.Cu|B.Cu|auto] [margin=N]
+        Route from a pad to the nearest existing trace on the same net."""
+        if len(args) < 2:
+            return "ERR: usage: route_tap <net> <x,y> [F.Cu|B.Cu|auto] [margin=N]"
+
+        net_name = args[0]
+        try:
+            x1, y1 = [float(v) for v in args[1].split(',')]
+        except ValueError:
+            return "ERR: coordinates must be x,y"
+
+        layer_mode = 'auto'
+        margin_override = None
+        for a in args[2:]:
+            if a in ('F.Cu', 'B.Cu', 'auto'):
+                layer_mode = a
+            elif a.startswith('margin='):
+                try:
+                    margin_override = int(a.split('=', 1)[1])
+                except ValueError:
+                    return "ERR: margin must be an integer"
+
+        grid, routeset = self._ensure_grid()
+        if grid is None:
+            return "ERR: no board loaded"
+
+        result = route_tap_by_name(grid, net_name, x1, y1,
+                                   layer_mode=layer_mode,
+                                   margin_override=margin_override)
+
+        if result.success:
+            net_id = grid.get_net_id(net_name)
+            path = result.path
+            src_pad = (path[0][0], path[0][1], path[0][2])
+            dst_pad = (path[-1][0], path[-1][1], path[-1][2])
+            tw = self.viewer.board.rules.track if self.viewer.board else 0.2
+            end_mm = result.tap_point
+            rid, output = routeset.add_route(net_id, src_pad, dst_pad, path, grid,
+                                             track_width_mm=tw,
+                                             start_mm=(x1, y1), end_mm=end_mm)
+            self._apply_track_output(net_name, output)
+            self._request_render()
+
+            wp_str = self._path_waypoints(path, grid)
+            tap_str = f"  tapped at ({end_mm[0]:.1f},{end_mm[1]:.1f})" if end_mm else ""
+            margin_str = f' margin={margin_override}' if margin_override is not None else ''
+            self._log(f"route_tap {net_name} {args[1]} {layer_mode}{margin_str} | {result.message}")
+            return f"OK: {result.message}{tap_str}\n  path: {wp_str}"
+
+        margin_str = f' margin={margin_override}' if margin_override is not None else ''
+        self._log(f"route_tap {net_name} {args[1]} {layer_mode}{margin_str} | FAIL: {result.message}")
         return f"FAIL: {result.message}"
 
     def _cmd_unroute(self, args):
@@ -618,6 +690,95 @@ class ApiServer:
         results = check_crowding(board, threshold_mm=threshold)
         return format_crowding(results, threshold_mm=threshold)
 
+    def _cmd_check_crowding_pads(self, args):
+        """check_crowding_pads [threshold_mm] — rank components by nearest foreign-net pad distance."""
+        threshold = DEFAULT_PAD_THRESHOLD_MM
+        if len(args) >= 1:
+            try:
+                threshold = float(args[0])
+            except ValueError:
+                return "ERR: invalid threshold — expected mm value"
+
+        board = self.viewer.board
+        if not board:
+            return "ERR: no board loaded"
+
+        results = check_pad_crowding(board, threshold_mm=threshold)
+        return format_pad_crowding(results, threshold_mm=threshold)
+
+    def _cmd_check_ratsnest(self, args):
+        """check_ratsnest [threshold_mm] — find foreign pads blocking ratsnest lines."""
+        threshold = DEFAULT_RATSNEST_THRESHOLD_MM
+        if len(args) >= 1:
+            try:
+                threshold = float(args[0])
+            except ValueError:
+                return "ERR: invalid threshold — expected mm value"
+
+        board = self.viewer.board
+        if not board:
+            return "ERR: no board loaded"
+
+        results = check_ratsnest(board, threshold_mm=threshold)
+        return format_ratsnest(results, threshold_mm=threshold)
+
+    def _cmd_force(self, args):
+        """force [ref] — show attraction force vector for a component, or all components."""
+        board = self.viewer.board
+        if not board:
+            return "ERR: no board loaded"
+
+        if len(args) >= 1:
+            result = compute_force(board, args[0])
+            return format_force(result)
+        else:
+            results = compute_force_all(board)
+            return format_force_all(results)
+
+    def _cmd_repulsion(self, args):
+        """repulsion [ref] [threshold_mm] — show repulsion from foreign ratsnest lines."""
+        board = self.viewer.board
+        if not board:
+            return "ERR: no board loaded"
+
+        threshold = DEFAULT_REPULSION_THRESHOLD_MM
+        ref = None
+
+        for a in args:
+            try:
+                threshold = float(a)
+            except ValueError:
+                ref = a
+
+        if ref:
+            result = compute_repulsion(board, ref, threshold_mm=threshold)
+            return format_repulsion(result)
+        else:
+            results = compute_repulsion_all(board, threshold_mm=threshold)
+            return format_repulsion_all(results)
+
+    def _cmd_pressure(self, args):
+        """pressure [ref] [threshold_mm] — show foreign pad pressure around a component."""
+        board = self.viewer.board
+        if not board:
+            return "ERR: no board loaded"
+
+        threshold = DEFAULT_PRESSURE_THRESHOLD_MM
+        ref = None
+
+        for a in args:
+            try:
+                threshold = float(a)
+            except ValueError:
+                ref = a
+
+        if ref:
+            result = compute_pressure(board, ref, threshold_mm=threshold)
+            return format_pressure(result)
+        else:
+            results = compute_pressure_all(board, threshold_mm=threshold)
+            return format_pressure_all(results)
+
     def _cmd_keepouts(self, args):
         """keepouts reload|clear|save|status — manage grid keepout overlay."""
         if len(args) < 1:
@@ -815,9 +976,15 @@ class ApiServer:
     def _cmd_help(self):
         return ("OK: commands:\n"
                 "  route <net> <x1,y1> <x2,y2> [F.Cu|B.Cu|auto]\n"
+                "  route_tap <net> <x,y> [F.Cu|B.Cu|auto] [margin=N]\n"
                 "  via <net> <x,y>\n"
                 "  viacheck [threshold_mm]\n"
                 "  check_crowding [margin_mm] [ratio]\n"
+                "  check_crowding_pads [threshold_mm]\n"
+                "  check_ratsnest [threshold_mm]\n"
+                "  force [ref]\n"
+                "  repulsion [ref] [threshold_mm]\n"
+                "  pressure [ref] [threshold_mm]\n"
                 "  unroute <net>\n"
                 "  pads <net>\n"
                 "  waypoints <net>\n"
@@ -1075,7 +1242,7 @@ class ApiServer:
                 continue
             if key in board.pad_defs:
                 pads = board.pad_defs[key]
-                pad_strs = ','.join(f"{p.num}@({p.dx},{p.dy})" for p in pads)
+                pad_strs = ','.join(f"{p.num}@({p.dx},{p.dy}):{p.pad_type}" for p in pads)
                 lines.append(f"PADS:{fp.lib}:{key}:{pad_strs}")
                 written_pads.add(key)
 

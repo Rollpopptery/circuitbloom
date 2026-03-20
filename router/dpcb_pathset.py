@@ -82,7 +82,8 @@ class RouteSet:
 
     # ---- route management ----
 
-    def add_route(self, net_id, src_pad, dst_pad, raw_path, grid, track_width_mm=0.2):
+    def add_route(self, net_id, src_pad, dst_pad, raw_path, grid, track_width_mm=0.2,
+                  start_mm=None, end_mm=None):
         """
         Create a route from an A* result. Marks the path on grid,
         returns (route_id, TrackOutput).
@@ -117,7 +118,24 @@ class RouteSet:
         # Generate track output starting from the junction (last pre-existing cell)
         net_name = _net_name_from_id(grid, net_id)
         output = TrackOutput()
-        _raw_path_to_output(raw_path[first_new:], net_name, grid, track_width_mm, output)
+        _raw_path_to_output(raw_path[first_new:], net_name, grid, track_width_mm, output,
+                            start_mm=start_mm, end_mm=end_mm)
+
+        # Check for via at the clipping boundary — a layer change between
+        # the last pre-existing cell and the first new cell may have been
+        # clipped out of the path passed to _raw_path_to_output.
+        if first_new > 0 and first_new < len(raw_path):
+            prev_layer = raw_path[first_new - 1][2]
+            curr_layer = raw_path[first_new][2]
+            if prev_layer != curr_layer:
+                gx, gy = raw_path[first_new][0], raw_path[first_new][1]
+                vx, vy = grid.grid_to_mm(gx, gy)
+                output.vias.append(ViaPoint(
+                    vx, vy,
+                    grid.via_od * GRID_PITCH,
+                    grid.via_id * GRID_PITCH,
+                    net_name
+                ))
 
         return route_id, output
 
@@ -297,12 +315,40 @@ class RouteSet:
 # ============ GRID OPERATIONS ============
 
 def _mark_path_on_grid(path, net_id, grid, track_width_cells):
-    """Stamp path cells + via circles onto the occupancy grid."""
+    """Stamp simplified path segments + via circles onto the occupancy grid.
+
+    Simplifies the raw A* staircase path into straight segments first,
+    then marks grid cells along those straight lines.  This ensures the
+    grid matches the simplified track data stored in board.tracks, so
+    unroute_seg can clear exactly what was drawn.
+    """
+    from dpcb_router import _line_cells
     half_w = track_width_cells // 2
-    for gx, gy, layer in path:
-        for dy in range(-half_w, half_w + 1):
-            for dx in range(-half_w, half_w + 1):
-                grid.set_cell(layer, gx + dx, gy + dy, net_id)
+
+    # Split path into same-layer runs, simplify each, mark straight lines
+    i = 0
+    while i < len(path):
+        layer = path[i][2]
+        run_start = i
+        while i < len(path) and path[i][2] == layer:
+            i += 1
+        run = path[run_start:i]
+        if len(run) < 2:
+            # Single cell — mark it directly
+            if run:
+                gx, gy, _ = run[0]
+                for dy in range(-half_w, half_w + 1):
+                    for dx in range(-half_w, half_w + 1):
+                        grid.set_cell(layer, gx + dx, gy + dy, net_id)
+            continue
+        # Simplify into straight segments
+        segs = _simplify(run)
+        for (sx, sy, _), (ex, ey, _) in segs:
+            cells = _line_cells(sx, sy, ex, ey)
+            for cx, cy in cells:
+                for dy in range(-half_w, half_w + 1):
+                    for dx in range(-half_w, half_w + 1):
+                        grid.set_cell(layer, cx + dx, cy + dy, net_id)
 
     # Via circles on both layers
     for i in range(1, len(path)):
@@ -474,8 +520,14 @@ def _simplify(points):
     return segs
 
 
-def _raw_path_to_output(path, net_name, grid, track_width_mm, output):
-    """Append TrackSegments and ViaPoints from a raw (gx,gy,layer) path."""
+def _raw_path_to_output(path, net_name, grid, track_width_mm, output,
+                        start_mm=None, end_mm=None):
+    """Append TrackSegments and ViaPoints from a raw (gx,gy,layer) path.
+
+    start_mm/end_mm: optional (x, y) exact pad coordinates. If provided,
+    the first and last track segment endpoints are snapped to these
+    positions instead of grid-snapped coordinates.
+    """
     if not path:
         return
 
@@ -509,6 +561,14 @@ def _raw_path_to_output(path, net_name, grid, track_width_mm, output):
                 sx_mm, sy_mm, ex_mm, ey_mm,
                 LAYER_NAMES[layer], net_name, track_width_mm
             ))
+
+    # Snap first and last track endpoints to exact pad coordinates
+    if output.tracks and start_mm:
+        t = output.tracks[0]
+        t.x1_mm, t.y1_mm = start_mm
+    if output.tracks and end_mm:
+        t = output.tracks[-1]
+        t.x2_mm, t.y2_mm = end_mm
 
 
 def tracks_to_dpcb_lines(output):
