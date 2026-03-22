@@ -114,10 +114,11 @@ All fields are optional. Omit what you don't need. Every POST increments the ver
 ```json
 {
   "tree": { ... },
-  "components": { "U2": {"shape": [10,8], "rotation": 0, "type": "SOIC-14"} },
+  "components": { "U2": {"shape": [10,8], "rotation": 0, "offset": [0, -9], "type": "SOIC-14"} },
   "swap": ["R1", "R6"],
   "rotate_leaf": "J2",
-  "rotate": { "J2": 90 }
+  "rotate": { "J2": 90 },
+  "set_rotation": { "J2": 90 }
 }
 ```
 
@@ -126,8 +127,9 @@ All fields are optional. Omit what you don't need. Every POST increments the ver
 | `tree` | object | Replace the entire layout tree |
 | `components` | object | Update component metadata (merge) |
 | `swap` | `[id_a, id_b]` | Swap two nodes in the tree by id |
-| `rotate_leaf` | `id` | Swap a leaf's w and h in the tree |
-| `rotate` | `{id: degrees}` | Set rotation in component metadata |
+| `rotate_leaf` | `id` | Swap a leaf's w and h in the tree (dimensions only) |
+| `rotate` | `{id: degrees}` | Set rotation and auto-swap dimensions for 90°/270° changes |
+| `set_rotation` | `{id: degrees}` | Set rotation angle only (no dimension swap) |
 
 #### Tree operations vs full tree replacement
 
@@ -143,12 +145,14 @@ Stored separately from the tree. The tree only cares about `id`, `w`, `h`. The m
 {
   "shape": [10, 8],
   "rotation": 0,
+  "offset": [0, -9],
   "type": "SOIC-14"
 }
 ```
 
 - `shape`: original `[w, h]` of the footprint
 - `rotation`: degrees (0, 90, 180, 270)
+- `offset`: `[x, y]` in mm, in the component's local frame (rotates with the component). For parts whose KiCad origin is not at the footprint centre (e.g. connectors with origin at pin 1). Defaults to `[0, 0]` if omitted.
 - `type`: footprint name for KiCad
 
 ## How to use it

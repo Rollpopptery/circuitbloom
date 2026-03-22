@@ -145,8 +145,8 @@ PAGE = """<!DOCTYPE html>
     align-items: center;
     justify-content: center;
     font-family: monospace;
-    font-size: 10px;
-    background: #fff;
+    font-size: 21px;
+    background: #f5f5f0;
   }
   .group {
     position: absolute;
@@ -154,10 +154,12 @@ PAGE = """<!DOCTYPE html>
   }
   .group-label {
     position: absolute;
-    top: -12px;
+    top: -16px;
     left: 2px;
-    font-size: 8px;
-    color: #bbb;
+    font-size: 11px;
+    color: #999;
+    background: #fff;
+    padding: 0 3px;
     font-family: monospace;
     text-transform: uppercase;
     letter-spacing: 1px;
@@ -178,7 +180,7 @@ PAGE = """<!DOCTYPE html>
 </div>
 
 <script>
-var CELL = 28;
+var CELL = 16;
 var GAP = 1;
 var tree = __TREE__;
 var components = __COMPONENTS__;

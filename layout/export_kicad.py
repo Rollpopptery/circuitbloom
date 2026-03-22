@@ -8,6 +8,7 @@ Uses kipy to move and rotate components in a running KiCad instance.
 
 import sys
 import json
+import math
 import time
 
 import kipy
@@ -71,9 +72,15 @@ def main():
 
         fp = fp_lookup[name]
 
-        # Position (centres, in nanometres)
-        new_x = origin_x + int(x_mm * 1e6)
-        new_y = origin_y + int(y_mm * 1e6)
+        # Position (centres, in nanometres) with optional offset in local frame
+        comp = comp_table.get(name, {})
+        ox, oy = comp.get("offset", [0, 0])
+        rotation = comp.get("rotation", 0)
+        rad = math.radians(rotation)
+        board_ox = ox * math.cos(rad) + oy * math.sin(rad)
+        board_oy = -ox * math.sin(rad) + oy * math.cos(rad)
+        new_x = origin_x + int((x_mm + board_ox) * 1e6)
+        new_y = origin_y + int((y_mm + board_oy) * 1e6)
         fp.position = Vector2.from_xy(new_x, new_y)
 
         # Rotation from component table
