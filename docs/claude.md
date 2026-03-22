@@ -44,8 +44,11 @@ For design rule questions:
         distill_sch.py          — .kicad_sch → .dsch
         gen_sch.py              — .dsch → .kicad_sch
         kicad_pin_atlas.json    — pin offsets for all KiCad symbols
-        cmd.py                  — CLI helper: send single command to viewer API
+        cmd.py                  — CLI helper: routing commands with routing diagnostics flash
+        cmd_component.py        — CLI helper: placement commands with placement diagnostics flash
+        script_autoplace_force.py — force-directed auto-placement (force + component_repulsion)
         checks/                 — check modules used by check_dpcb.py
+        router/component_repulsion.py — physical component spacing (Coulomb-like pairwise repulsion)
         docs/                   — all documentation (see READ FIRST)
 ```
 

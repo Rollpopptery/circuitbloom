@@ -11,11 +11,40 @@ ends with `\n.\n` (dot on its own line).
 
 ### Quick command-line access
 
+Two CLI wrappers — one for routing, one for placement:
+
+**cmd.py** — routing work (route, unroute, via, etc.)
 ```bash
 python3 utilities/cmd.py <command>
 python3 utilities/cmd.py status
 python3 utilities/cmd.py route +5V 9.85,4.05 9.5,11.75 auto margin=3
 ```
+
+After state-changing commands (route, unroute, via, move, load, save),
+automatically runs diagnostics: viacheck, check_crowding, check_crowding_pads,
+get_transitions. Shows diffs against previous state (NEW/FIXED).
+
+**cmd_component.py** — placement work (move, placement analysis)
+```bash
+python3 utilities/cmd_component.py move R1 8.5,12.5
+python3 utilities/cmd_component.py move U2 19.0,10.0 r90
+python3 utilities/cmd_component.py check_crowding_pads
+python3 utilities/cmd_component.py check_ratsnest
+python3 utilities/cmd_component.py force U2
+python3 utilities/cmd_component.py repulsion U2
+python3 utilities/cmd_component.py component_repulsion
+python3 utilities/cmd_component.py pads +5V
+python3 utilities/cmd_component.py status
+```
+
+After move/load/save, automatically runs placement diagnostics:
+- PAD CROWDING (check_crowding_pads 1.5) — with diff
+- RATSNEST BLOCKED (check_ratsnest 2.0) — with diff
+- FORCE — all components, attraction toward connections
+- REPULSION — all components, push from foreign ratsnest lines
+- COMPONENT REPULSION — all components, physical spacing pressure
+
+Uses separate flash state file so it does not interfere with cmd.py.
 
 Configurable via environment variables:
 - `DPCB_HOST` — viewer host (default: 172.17.0.1, Docker gateway)
@@ -376,6 +405,55 @@ OK: D3 (4.5,11.0)  repulsion=(0.5,-1.2)  mag=1.3mm  push_toward=(5.0,9.8)  from 
   Net-(D1-Pad1): (0.3,-0.8) from 2 line(s)
   Net-(D2-Pad1): (0.2,-0.4) from 3 line(s)
 ```
+
+
+### component_repulsion
+
+```
+component_repulsion [ref]
+```
+
+Show physical repulsion vector from ALL other components, regardless of net.
+This is Coulomb-like pairwise repulsion based on component size (pad bounding
+box radius) and inverse distance squared. Closer and larger components push
+harder.
+
+Use this to "feel" the physical spacing of the layout without seeing the
+board. High magnitude means the component is crowded by neighbours. The
+vector direction shows which way to move for more breathing room.
+
+Complements force and repulsion:
+- **force** = pull toward own connections (attraction)
+- **repulsion** = push away from other nets' routing corridors
+- **component_repulsion** = push away from all nearby components (physical spacing)
+
+Without ref: returns all components sorted by magnitude (most crowded first).
+With ref: returns single component with top 5 nearest contributors.
+
+```
+OK: 19 component(s)
+  R6   (2.0,7.0)  r=1.1mm  push=(-1.16,0.63)  mag=1.33mm
+  D3   (3.0,6.0)  r=1.4mm  push=(0.69,-0.83)  mag=1.08mm
+  J2   (7.4,0.8)  r=8.89mm  push=(0.26,-0.92)  mag=0.96mm
+  ...
+```
+
+```
+OK: R6 (2.0,7.0)  radius=1.1mm  repulsion=(-1.16,0.63)  mag=1.33mm  push_toward=(0.84,7.63)  from 18 component(s)
+  D3: (-0.8839,0.8839) dist=1.41mm
+  J1: (-0.0588,-0.3719) dist=3.2mm
+  U1: (-0.0148,0.1334) dist=4.53mm
+  ...
+```
+
+The `r=` field is the component radius — half the diagonal of the pad
+bounding box. Larger components (ICs, connectors) have larger radii and
+push harder. The radius also indicates how much board space the component
+occupies.
+
+Physics model: for each pair (A, B), the force on A from B is:
+  direction = unit vector from B to A (pushes A away)
+  magnitude = (radius_A + radius_B) / distance²
 
 
 ## LOGGING

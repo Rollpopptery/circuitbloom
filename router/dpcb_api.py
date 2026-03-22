@@ -35,6 +35,7 @@ from ratsnest_check import check_ratsnest, format_ratsnest, DEFAULT_RATSNEST_THR
 from force_check import compute_force, compute_force_all, format_force, format_force_all
 from repulsion_check import compute_repulsion, compute_repulsion_all, format_repulsion, format_repulsion_all, DEFAULT_REPULSION_THRESHOLD_MM
 from pad_pressure import compute_pressure, compute_pressure_all, format_pressure, format_pressure_all, DEFAULT_PRESSURE_THRESHOLD_MM
+from component_repulsion import compute_component_repulsion, compute_component_repulsion_all, format_component_repulsion, format_component_repulsion_all
 from discipline import prompt as discipline_prompt
 from dpcb_log import log as design_log
 
@@ -190,6 +191,8 @@ class ApiServer:
                 return self._cmd_repulsion(parts[1:])
             elif cmd == 'pressure':
                 return self._cmd_pressure(parts[1:])
+            elif cmd == 'component_repulsion':
+                return self._cmd_component_repulsion(parts[1:])
             elif cmd == 'get_vias':
                 return self._cmd_get_vias()
             elif cmd == 'get_transitions':
@@ -756,6 +759,19 @@ class ApiServer:
         else:
             results = compute_repulsion_all(board, threshold_mm=threshold)
             return format_repulsion_all(results)
+
+    def _cmd_component_repulsion(self, args):
+        """component_repulsion [ref] — show physical repulsion from all other components."""
+        board = self.viewer.board
+        if not board:
+            return "ERR: no board loaded"
+
+        if len(args) >= 1:
+            result = compute_component_repulsion(board, args[0])
+            return format_component_repulsion(result)
+        else:
+            results = compute_component_repulsion_all(board)
+            return format_component_repulsion_all(results)
 
     def _cmd_pressure(self, args):
         """pressure [ref] [threshold_mm] — show foreign pad pressure around a component."""
