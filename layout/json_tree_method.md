@@ -257,3 +257,70 @@ The system has five primitives and nothing else:
 5. **Rotate** — flip a leaf's dimensions
 
 No CSS grid. No packing algorithm. No column counts. No alignment properties. Groups give nesting, row/column gives direction, spacers give offset, swap gives safe edits. That covers every layout move.
+
+## Agent tools
+
+Scripts for automated placement optimization. Each one performs an action, exports to KiCad via `export_kicad.py`, and reports the resulting ratline total.
+
+All agent tools accept an optional `--ignore NET1,NET2,...` flag to exclude nets (e.g. ground) from the ratline total. Nets routed via ground plane don't benefit from placement optimization, so excluding them focuses the score on signal routing.
+
+### ratlines.py — Measure placement quality
+
+Connects to a running KiCad instance, reads all pads, groups by net, computes the minimum spanning tree (MST) per net. The MST total is a proxy for routing difficulty — lower is better.
+
+```bash
+python ratlines.py                        # all nets
+python ratlines.py --ignore GNDREF,GND    # exclude ground
+```
+
+Output includes:
+- Per-net MST length with individual edges
+- Direction arrows on each edge (←→↑↓) showing which way the ratline pulls
+- **Pull vectors** per component — the net force showing which direction a component wants to move. Use these to decide placement changes instead of brute-forcing.
+
+### agent_rotate.py — Rotate and measure
+
+Rotates a component via the layout server, exports to KiCad, prints the ratline total.
+
+```bash
+python agent_rotate.py U2 90                        # all nets
+python agent_rotate.py U2 90 --ignore GNDREF,GND    # exclude ground
+```
+
+Workflow: try all four rotations (0, 90, 180, 270), keep the one with the lowest ratline total.
+
+### agent_move.py — Move between groups and measure
+
+Moves a component from its current group to a different group in the tree, exports to KiCad, prints the ratline total.
+
+```bash
+python agent_move.py R3 interface                          # append to group
+python agent_move.py R3 interface after:D2                 # insert after D2
+python agent_move.py R3 interface before:D1                # insert before D1
+python agent_move.py R3 interface 2                        # insert at index 2
+python agent_move.py R3 interface after:D2 --ignore GNDREF # exclude ground
+```
+
+Internally: GET `/tree`, remove the node, insert at the target, POST the modified tree back. Then export and measure.
+
+### export_kicad.py — Push layout to KiCad
+
+Reads layout state from stdin, transforms tree positions to mm coordinates, and moves/rotates footprints in a running KiCad instance via the IPC API.
+
+```bash
+curl -s http://localhost:8081 | python export_kicad.py
+```
+
+### Optimization workflow
+
+1. **Read ratlines** — `python ratlines.py --ignore GNDREF` to see long edges and pull vectors
+2. **Interpret pull vectors** — a component pulled "right 10mm" means its net partners are to its right; move it rightward in the tree (swap with a rightward sibling, move to a rightward group, or add a spacer)
+3. **Act** — use `agent_rotate.py`, `agent_move.py`, or direct `curl` commands (swap, spacer adjustments, tree restructuring)
+4. **Measure** — check the new ratline total; keep improvements, revert regressions
+5. **Repeat** — the pull vectors update after each change, guiding the next move
+
+Tips:
+- Spacers are powerful — sliding a header with a spacer (e.g. `{"id": "_spcj2", "w": 13, "h": 1}`) can dramatically shorten nets to aligned ICs
+- Swaps between same-size components are safe and cheap to test
+- Moving components between groups can change widths of rows/columns, causing ripple effects — always measure
+- Rotation only changes pad orientation; placement changes move the whole component
