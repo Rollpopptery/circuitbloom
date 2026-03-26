@@ -7,13 +7,17 @@ Requirements:
   /tmp/kicad/ owned by your user (not root)
 """
 
+import glob
 import kipy
 from kipy.common_types import Vector2
 
 
 def main():
     print("Connecting to KiCad...")
-    kicad = kipy.KiCad()
+    socks = glob.glob('/tmp/kicad/api-*.sock')
+    if not socks:
+        raise RuntimeError('No KiCad PCB editor socket found in /tmp/kicad/')
+    kicad = kipy.KiCad(socket_path='ipc://' + socks[0])
     board = kicad.get_board()
     print("Connected.")
 

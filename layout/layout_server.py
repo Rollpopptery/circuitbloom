@@ -11,6 +11,7 @@ The layout is a single JSON tree. Every node is either:
 Size flows up. Position flows down. Arrangements within arrangements.
 """
 
+import argparse
 import http.server
 import json
 import subprocess
@@ -28,7 +29,75 @@ state = {
     "components": {},    # refdes -> {"shape": [w,h], "rotation": 0, "type": "..."}
 }
 
+bloom_data = None        # full .bloom dict, kept for round-trip save
+bloom_path = None        # path to loaded .bloom file
+
 lock = threading.Lock()
+
+
+# ============================================================
+# BLOOM LOAD / SAVE
+# ============================================================
+
+def load_bloom(path):
+    """Load a .bloom file, populate state with tree and components."""
+    global bloom_data, bloom_path
+
+    with open(path, "r") as f:
+        bloom = json.load(f)
+
+    bloom_data = bloom
+    bloom_path = path
+
+    components = bloom.get("components", {})
+    shapes = bloom.get("pcb", {}).get("shapes", {})
+
+    # Build component metadata for CircuitBloom
+    comp_meta = {}
+    for ref, comp in components.items():
+        package = comp.get("package", "")
+        shape = shapes.get(package, [4, 3])  # default if missing
+        comp_meta[ref] = {
+            "shape": shape,
+            "rotation": 0,
+            "type": package
+        }
+
+    # Build tree: use layout_tree from .bloom if present, else auto-generate
+    tree = bloom.get("layout_tree")
+    if tree is None:
+        # Auto-generate: single column of all components
+        children = []
+        for ref in components:
+            package = comp_meta[ref]["type"]
+            shape = comp_meta[ref]["shape"]
+            children.append({"id": ref, "w": shape[0], "h": shape[1]})
+        tree = {"id": "board", "arrange": "column", "children": children}
+
+    with lock:
+        state["tree"] = tree
+        state["components"] = comp_meta
+        state["version"] += 1
+
+    print(f"  [bloom] Loaded {path}: {len(components)} components, {len(shapes)} shapes")
+
+
+def save_bloom(path=None):
+    """Save layout_tree back into the .bloom file."""
+    global bloom_data, bloom_path
+
+    save_path = path or bloom_path
+    if not save_path or not bloom_data:
+        return False, "no .bloom file loaded"
+
+    with lock:
+        bloom_data["layout_tree"] = state["tree"]
+
+    with open(save_path, "w") as f:
+        json.dump(bloom_data, f, indent=2)
+
+    print(f"  [bloom] Saved {save_path}")
+    return True, f"saved to {save_path}"
 
 
 # ============================================================
@@ -503,7 +572,15 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
         GET /tree          — layout tree only
         GET /components    — component table only
         GET /component/R1  — single component
+        GET /save          — save layout_tree back to .bloom file
         """
+        if self.path == '/save':
+            ok, msg = save_bloom()
+            self.send_response(200 if ok else 400)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": ok, "message": msg}).encode())
+            return
         if self.path == '/tree':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -546,6 +623,13 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
 # ============================================================
 
 def run():
+    parser = argparse.ArgumentParser(description="CircuitBloom layout server")
+    parser.add_argument("bloom", nargs="?", help="Path to .bloom file to load on startup")
+    args = parser.parse_args()
+
+    if args.bloom:
+        load_bloom(args.bloom)
+
     browser = http.server.HTTPServer(('0.0.0.0', 8080), BrowserHandler)
     agent = http.server.HTTPServer(('0.0.0.0', 8081), AgentHandler)
 
@@ -557,14 +641,17 @@ def run():
     print("  ==============================================")
     print("  Browser:  http://localhost:8080")
     print("  Agent:    http://localhost:8081")
+    if args.bloom:
+        print(f"  Bloom:    {args.bloom}")
     print()
     print("  Operations:")
     print('    tree:        POST { "tree": {...} }           — replace full tree')
     print('    swap:        POST { "swap": ["R1","R6"] }     — swap two nodes')
     print('    rotate_leaf: POST { "rotate_leaf": "J2" }     — swap w/h of a leaf')
     print('    components:  POST { "components": {...} }     — update metadata')
+    print('    save:        GET /save                        — save tree to .bloom')
     print()
-    print("  Waiting for agent...")
+    print("  Ready." if args.bloom else "  Waiting for agent...")
     print("  Press Ctrl+C to stop.")
     print()
 

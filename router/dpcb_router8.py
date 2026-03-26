@@ -177,13 +177,14 @@ def route8(grid, x1_mm, y1_mm, x2_mm, y2_mm, net_id,
 def route8_by_name(grid, net_name, x1_mm, y1_mm, x2_mm, y2_mm,
                    layer_mode='auto', via_cost=300, track_width_cells=2,
                    margin_override=None):
+    from dpcb_router import _find_pad_layer
     nid = grid.get_net_id(net_name)
     if not nid:
         return RouteResult(False, message=f"Unknown net: {net_name}")
     gx1, gy1 = grid.mm_to_grid(x1_mm, y1_mm)
     gx2, gy2 = grid.mm_to_grid(x2_mm, y2_mm)
-    start_layer = grid.pad_layers.get((gx1, gy1))
-    end_layer = grid.pad_layers.get((gx2, gy2))
+    start_layer = _find_pad_layer(grid, gx1, gy1)
+    end_layer = _find_pad_layer(grid, gx2, gy2)
     return route8(grid, x1_mm, y1_mm, x2_mm, y2_mm, nid,
                   layer_mode, via_cost, track_width_cells,
                   start_layer=start_layer, end_layer=end_layer,

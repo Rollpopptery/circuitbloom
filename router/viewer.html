@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Route View</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    background: #1a1a1a;
+    font-family: monospace;
+    color: #ccc;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+}
+.toolbar {
+    display: flex;
+    gap: 10px;
+    padding: 6px 12px;
+    background: #222;
+    border-bottom: 1px solid #333;
+    align-items: center;
+    font-size: 11px;
+    flex-shrink: 0;
+}
+.toolbar button {
+    font-family: monospace;
+    font-size: 11px;
+    padding: 3px 10px;
+    cursor: pointer;
+    border: 1px solid #555;
+    background: #333;
+    color: #ccc;
+}
+.toolbar button:hover { background: #444; }
+.toolbar button.active { background: #558; border-color: #88a; color: #fff; }
+.toolbar .sep { border-left: 1px solid #444; height: 16px; }
+#info { color: #888; margin-left: auto; }
+canvas {
+    flex: 1;
+    cursor: crosshair;
+}
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+    <button id="btnFCu" class="active" onclick="toggleLayer('fcu')">F.Cu</button>
+    <button id="btnBCu" class="active" onclick="toggleLayer('bcu')">B.Cu</button>
+    <div class="sep"></div>
+    <button onclick="togglePadLabels()">Labels</button>
+    <button onclick="toggleRatsnest()">Ratsnest</button>
+    <button onclick="resetView()">Reset</button>
+    <span id="info"></span>
+</div>
+
+<canvas id="cv"></canvas>
+
+<script>
+var PADS = __PADS__;
+var TRACKS = __TRACKS__;
+var VIAS = __VIAS__;
+var BOARD = __BOARD__;
+var NETS = __NETS__;
+var COMPS = __COMPS__;
+var RECTS = __RECTS__;
+var HIGHLIGHT = __HIGHLIGHT__;
+var MARKERS = __MARKERS__;
+var VERSION = __VERSION__;
+
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d');
+var W, H;
+
+// View state
+var zoom = 10;  // pixels per mm
+var panX = 20, panY = 20;  // offset in pixels
+var showFCu = true, showBCu = true;
+var showLabels = true;
+var showRatsnest = true;
+var hoverNet = null;
+var hoverPad = null;
+
+// Colors
+var COL_BOARD = '#0a2e12';
+var COL_FCU = '#cc4422';
+var COL_BCU = '#2266cc';
+var COL_PAD_SMD = '#d4aa00';
+var COL_PAD_TH = '#00aa88';
+var COL_VIA = '#44bb44';
+var COL_HIGHLIGHT = '#ffff00';
+var COL_RATSNEST = 'rgba(255,255,255,0.15)';
+
+function resize() {
+    cv.width = cv.clientWidth;
+    cv.height = cv.clientHeight;
+    W = cv.width;
+    H = cv.height;
+    draw();
+}
+
+function boardToScreen(bx, by) {
+    return [bx * zoom + panX, by * zoom + panY];
+}
+
+function screenToBoard(sx, sy) {
+    return [(sx - panX) / zoom, (sy - panY) / zoom];
+}
+
+function resetView() {
+    var pad = 40;
+    var scaleX = (W - 2*pad) / BOARD.width;
+    var scaleY = (H - 2*pad) / BOARD.height;
+    zoom = Math.min(scaleX, scaleY);
+    panX = (W - BOARD.width * zoom) / 2;
+    panY = (H - BOARD.height * zoom) / 2;
+    draw();
+}
+
+// ---- Drawing ----
+
+function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // Board
+    var tl = boardToScreen(0, 0);
+    var br = boardToScreen(BOARD.width, BOARD.height);
+    ctx.fillStyle = COL_BOARD;
+    ctx.fillRect(tl[0], tl[1], br[0]-tl[0], br[1]-tl[1]);
+    ctx.strokeStyle = '#2a5e32';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tl[0], tl[1], br[0]-tl[0], br[1]-tl[1]);
+
+    // Grid (if zoomed in enough)
+    if (zoom > 30) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+        ctx.lineWidth = 0.5;
+        var step = 1; // 1mm
+        for (var x = 0; x <= BOARD.width; x += step) {
+            var sx = boardToScreen(x, 0);
+            var ex = boardToScreen(x, BOARD.height);
+            ctx.beginPath(); ctx.moveTo(sx[0], sx[1]); ctx.lineTo(ex[0], ex[1]); ctx.stroke();
+        }
+        for (var y = 0; y <= BOARD.height; y += step) {
+            var sy = boardToScreen(0, y);
+            var ey = boardToScreen(BOARD.width, y);
+            ctx.beginPath(); ctx.moveTo(sy[0], sy[1]); ctx.lineTo(ey[0], ey[1]); ctx.stroke();
+        }
+    }
+
+    // Layout tree rectangles
+    drawRects();
+
+    // B.Cu tracks (behind)
+    if (showBCu) drawTracks('B.Cu', COL_BCU);
+    // F.Cu tracks (front)
+    if (showFCu) drawTracks('F.Cu', COL_FCU);
+
+    // Vias
+    for (var i = 0; i < VIAS.length; i++) {
+        var v = VIAS[i];
+        var p = boardToScreen(v.x, v.y);
+        var r = (v.od || 0.6) / 2 * zoom;
+        var ir = (v.id || 0.3) / 2 * zoom;
+        var col = (hoverNet && v.net === hoverNet) ? COL_HIGHLIGHT : COL_VIA;
+        ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, Math.PI*2);
+        ctx.fillStyle = col; ctx.fill();
+        ctx.beginPath(); ctx.arc(p[0], p[1], ir, 0, Math.PI*2);
+        ctx.fillStyle = '#1a1a1a'; ctx.fill();
+    }
+
+    // Ratsnest
+    if (showRatsnest) drawRatsnest();
+
+    // Pads
+    for (var i = 0; i < PADS.length; i++) {
+        var pad = PADS[i];
+        var p = boardToScreen(pad.x, pad.y);
+        var r = (pad.smd ? 0.25 : 0.4) * zoom;
+        var isHover = (hoverNet && pad.net === hoverNet);
+        var col = isHover ? COL_HIGHLIGHT : (pad.smd ? COL_PAD_SMD : COL_PAD_TH);
+        ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, Math.PI*2);
+        ctx.fillStyle = col; ctx.fill();
+    }
+
+    // Pad labels
+    if (showLabels && zoom > 8) {
+        ctx.font = Math.max(8, zoom * 0.6) + 'px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        for (var i = 0; i < PADS.length; i++) {
+            var pad = PADS[i];
+            var p = boardToScreen(pad.x, pad.y);
+            var isHover = (hoverNet && pad.net === hoverNet);
+            ctx.fillStyle = isHover ? '#fff' : 'rgba(255,255,255,0.4)';
+            var label = pad.ref + '.' + pad.pin;
+            ctx.fillText(label, p[0], p[1] - (pad.smd ? 0.3 : 0.5) * zoom);
+        }
+    }
+
+    // Component labels
+    if (zoom > 4) {
+        ctx.font = Math.max(9, zoom * 0.8) + 'px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = 'rgba(255,255,255,0.25)';
+        for (var ref in COMPS) {
+            var c = COMPS[ref];
+            var p = boardToScreen(c.x, c.y);
+            ctx.fillText(ref, p[0], p[1]);
+        }
+    }
+
+    // Markers
+    for (var i = 0; i < MARKERS.length; i++) {
+        var m = MARKERS[i];
+        var sz = m.size || 1;
+        var p = boardToScreen(m.x, m.y);
+        ctx.beginPath(); ctx.arc(p[0], p[1], 5 * sz, 0, Math.PI*2);
+        ctx.fillStyle = m.color || '#ff00ff';
+        ctx.fill();
+        if (m.label) {
+            var fontSize = Math.max(8, sz * zoom);
+            ctx.font = fontSize + 'px monospace';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'bottom';
+            var tx = p[0] + 7 * sz, ty = p[1] - 3 * sz;
+            var tw = ctx.measureText(m.label).width;
+            ctx.fillStyle = 'rgba(40,40,40,0.9)';
+            ctx.fillRect(tx - 2, ty - fontSize, tw + 4, fontSize + 2);
+            ctx.fillStyle = m.color || '#ff00ff';
+            ctx.fillText(m.label, tx, ty);
+        }
+        if (m.lx !== undefined && m.ly !== undefined) {
+            var lp = boardToScreen(m.lx, m.ly);
+            ctx.strokeStyle = m.color || '#ff00ff';
+            ctx.lineWidth = sz;
+            ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(lp[0], lp[1]); ctx.stroke();
+        }
+    }
+}
+
+function drawTracks(layer, color) {
+    for (var i = 0; i < TRACKS.length; i++) {
+        var t = TRACKS[i];
+        if (t.layer !== layer) continue;
+        var a = boardToScreen(t.x1, t.y1);
+        var b = boardToScreen(t.x2, t.y2);
+        var w = (t.width || 0.25) * zoom;
+        var isHover = (hoverNet && t.net === hoverNet);
+        ctx.strokeStyle = isHover ? COL_HIGHLIGHT : color;
+        ctx.lineWidth = Math.max(1, w);
+        ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+}
+
+function drawRects() {
+    ctx.lineWidth = 0.5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    for (var i = 0; i < RECTS.length; i++) {
+        var r = RECTS[i];
+        if (r.w === 0 && r.h === 0) continue;
+        var tl = boardToScreen(r.x, r.y);
+        var br = boardToScreen(r.x + r.w, r.y + r.h);
+        ctx.strokeRect(tl[0], tl[1], br[0] - tl[0], br[1] - tl[1]);
+    }
+}
+
+function drawRatsnest() {
+    // Simple nearest-neighbour ratsnest per net
+    var netPads = {};
+    for (var i = 0; i < PADS.length; i++) {
+        var p = PADS[i];
+        if (!p.net) continue;
+        if (!netPads[p.net]) netPads[p.net] = [];
+        netPads[p.net].push(p);
+    }
+    ctx.strokeStyle = COL_RATSNEST;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    for (var net in netPads) {
+        var pp = netPads[net];
+        if (pp.length < 2) continue;
+        // Chain nearest neighbours
+        var used = [false];
+        for (var k = 0; k < pp.length; k++) used[k] = false;
+        used[0] = true;
+        var last = 0;
+        for (var k = 1; k < pp.length; k++) {
+            var bestD = Infinity, bestJ = -1;
+            for (var j = 0; j < pp.length; j++) {
+                if (used[j]) continue;
+                var dx = pp[j].x - pp[last].x;
+                var dy = pp[j].y - pp[last].y;
+                var d = dx*dx + dy*dy;
+                if (d < bestD) { bestD = d; bestJ = j; }
+            }
+            if (bestJ < 0) break;
+            var a = boardToScreen(pp[last].x, pp[last].y);
+            var b = boardToScreen(pp[bestJ].x, pp[bestJ].y);
+            ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+            used[bestJ] = true;
+            last = bestJ;
+        }
+    }
+    ctx.setLineDash([]);
+}
+
+// ---- Interaction ----
+
+function toggleLayer(id) {
+    if (id === 'fcu') { showFCu = !showFCu; document.getElementById('btnFCu').classList.toggle('active'); }
+    if (id === 'bcu') { showBCu = !showBCu; document.getElementById('btnBCu').classList.toggle('active'); }
+    draw();
+}
+
+function togglePadLabels() { showLabels = !showLabels; draw(); }
+function toggleRatsnest() { showRatsnest = !showRatsnest; draw(); }
+
+// Right-click pan, left-click drag components (topology-based, grid-quantized)
+var GRID_CELL = 1.0; // mm per grid cell — matches tree_to_xy SCALE
+var panning = false, panStartX, panStartY;
+var movingComp = null, moveStartBoardX = 0, moveStartBoardY = 0;
+var accumDW = 0, accumDH = 0;
+
+cv.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+
+cv.addEventListener('mousedown', function(e) {
+    if (e.button === 2) {
+        panning = true; panStartX = e.clientX; panStartY = e.clientY;
+    } else if (e.button === 0) {
+        var bp = screenToBoard(e.clientX, e.clientY);
+        var bestD = 3.0;
+        var bestRef = null;
+        for (var ref in COMPS) {
+            var c = COMPS[ref];
+            var dx = c.x - bp[0], dy = c.y - bp[1];
+            var d = Math.sqrt(dx*dx + dy*dy);
+            if (d < bestD) { bestD = d; bestRef = ref; }
+        }
+        if (bestRef) {
+            movingComp = bestRef;
+            moveStartBoardX = bp[0];
+            moveStartBoardY = bp[1];
+            accumDW = 0;
+            accumDH = 0;
+            cv.style.cursor = 'grabbing';
+        }
+    }
+});
+
+cv.addEventListener('mousemove', function(e) {
+    if (panning) {
+        panX += e.clientX - panStartX;
+        panY += e.clientY - panStartY;
+        panStartX = e.clientX; panStartY = e.clientY;
+        draw();
+    } else if (movingComp) {
+        var bp = screenToBoard(e.clientX, e.clientY);
+        var rawDX = bp[0] - moveStartBoardX;
+        var rawDY = bp[1] - moveStartBoardY;
+        // Quantize to grid cells
+        var newDW = Math.round(rawDX / GRID_CELL);
+        var newDH = Math.round(rawDY / GRID_CELL);
+        // Only update visuals when we cross a grid cell boundary
+        if (newDW !== accumDW || newDH !== accumDH) {
+            var stepDX = (newDW - accumDW) * GRID_CELL;
+            var stepDY = (newDH - accumDH) * GRID_CELL;
+            COMPS[movingComp].x += stepDX;
+            COMPS[movingComp].y += stepDY;
+            for (var i = 0; i < PADS.length; i++) {
+                if (PADS[i].ref === movingComp) {
+                    PADS[i].x += stepDX;
+                    PADS[i].y += stepDY;
+                }
+            }
+            accumDW = newDW;
+            accumDH = newDH;
+            draw();
+        }
+    } else {
+        // Hover detection + cursor coordinates
+        var bp = screenToBoard(e.clientX, e.clientY);
+        var info = document.getElementById('info');
+        var coordStr = '(' + bp[0].toFixed(1) + ', ' + bp[1].toFixed(1) + ')';
+        var bestD = 0.8;
+        var bestPad = null;
+        for (var i = 0; i < PADS.length; i++) {
+            var p = PADS[i];
+            var dx = p.x - bp[0], dy = p.y - bp[1];
+            var d = Math.sqrt(dx*dx + dy*dy);
+            if (d < bestD) { bestD = d; bestPad = p; }
+        }
+        var newNet = bestPad ? bestPad.net : null;
+        if (newNet !== hoverNet || bestPad !== hoverPad) {
+            hoverNet = newNet;
+            hoverPad = bestPad;
+            draw();
+        }
+        if (hoverPad) {
+            info.textContent = hoverPad.ref + '.' + hoverPad.pin + ' (' + hoverPad.name + ')  net=' + hoverPad.net + '  ' + coordStr;
+        } else {
+            info.textContent = coordStr;
+        }
+        var overComp = false;
+        for (var ref in COMPS) {
+            var c = COMPS[ref];
+            var cdx = c.x - bp[0], cdy = c.y - bp[1];
+            if (Math.sqrt(cdx*cdx + cdy*cdy) < 3.0) { overComp = true; break; }
+        }
+        cv.style.cursor = overComp ? 'grab' : 'crosshair';
+    }
+});
+
+cv.addEventListener('mouseup', function(e) {
+    if (panning) { panning = false; }
+    if (movingComp) {
+        if (accumDW !== 0 || accumDH !== 0) {
+            fetch('/api', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'move', ref: movingComp, dw: accumDW, dh: accumDH})
+            });
+        }
+        cv.style.cursor = 'crosshair';
+        movingComp = null;
+    }
+});
+cv.addEventListener('mouseleave', function() { panning = false; movingComp = null; });
+
+// Rotate grabbed component with R key
+document.addEventListener('keydown', function(e) {
+    if (movingComp && (e.key === 'r' || e.key === 'R')) {
+        fetch('/api', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'rotate', ref: movingComp})
+        });
+    }
+});
+
+// Zoom
+cv.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    var bp = screenToBoard(e.clientX, e.clientY);
+    var factor = e.deltaY < 0 ? 1.15 : 1/1.15;
+    zoom *= factor;
+    zoom = Math.max(1, Math.min(200, zoom));
+    // Zoom towards cursor
+    panX = e.clientX - bp[0] * zoom;
+    panY = e.clientY - bp[1] * zoom;
+    draw();
+}, {passive: false});
+
+// Init
+window.addEventListener('resize', resize);
+resize();
+
+// Restore view state or reset
+var savedView = sessionStorage.getItem('viewState');
+if (savedView) {
+    var sv = JSON.parse(savedView);
+    zoom = sv.zoom; panX = sv.panX; panY = sv.panY;
+    draw();
+} else {
+    resetView();
+}
+
+// Auto-reload (preserve view state)
+setInterval(async function() {
+    try {
+        var r = await fetch('/version');
+        var d = await r.json();
+        if (d.v > VERSION) {
+            sessionStorage.setItem('viewState', JSON.stringify({zoom: zoom, panX: panX, panY: panY}));
+            location.reload();
+        }
+    } catch(e) {}
+}, 500);
+</script>
+</body>
+</html>

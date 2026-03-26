@@ -7,6 +7,7 @@ Usage:
 """
 
 import sys
+import glob
 import json
 import subprocess
 import urllib.request
@@ -60,7 +61,10 @@ def main():
         sys.exit(1)
 
     # 3. Read ratlines from KiCad
-    kicad = kipy.KiCad()
+    socks = glob.glob('/tmp/kicad/api-*.sock')
+    if not socks:
+        raise RuntimeError('No KiCad PCB editor socket found in /tmp/kicad/')
+    kicad = kipy.KiCad(socket_path='ipc://' + socks[0])
     board = kicad.get_board()
 
     pad_id_to_ref = {}

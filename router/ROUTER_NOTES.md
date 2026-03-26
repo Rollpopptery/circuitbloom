@@ -1,126 +1,196 @@
-# DPCB Router Development Notes
+# Route Server — API Reference
 
-## Session: 2026-03-15
+## Architecture
 
-### Bugs Fixed
+- `route_server.py` — Entry point, arg parsing, file watcher
+- `route_state.py` — Shared state, bloom load/save, placement, routing helpers
+- `route_handlers.py` — HTTP handlers (browser port 8083, agent port 8084)
+- `route_convert.py` — Path-to-segment conversion, net colors
+- `viewer.html` — Interactive HTML/Canvas viewer
+- `bloom_grid.py` — Bloom file loading, grid building, pad positions
+- `tree_to_xy.py` — Placement resolver (grid-cell to mm)
+- `dpcb_router.py` — Core A* router, grid management
+- `dpcb_router8.py` — 8-direction A* router (45-degree traces)
 
-1. **Type mismatch in pad_net lookup** - `pad.num` is int, NET parsing stored pin as int, but lookup used `str(pad.num)`. Fixed to use int consistently.
-
-2. **Unconnected pads not blocking** - Pads with `nid=0` (not in any net) were treated as empty space. Now marked as `-1` (obstacle) to block all routes.
-
-3. **Pad radius too large** - `pad_r=4` plus routing margin exceeded TSSOP 0.65mm pitch. Reduced to `pad_r=2`.
-
-4. **SMD pads on both layers** - SMD pads were marked on F.Cu and B.Cu. Now inferred from footprint type (`_SMD`, `Package_SO`, `SOIC`, `TSSOP`, `QFP`, `BGA`) and marked on F.Cu only.
-
-5. **A* goal accepts any layer** - Routes could reach SMD pads from wrong layer without via. Added `start_layer` and `end_layer` parameters to `route()`. Pad layers stored in `grid.pad_layers` dict.
-
-6. **Vias placed on pads** - Via placement allowed on same-net pads. Added `grid.pad_keepout` set with `via_keepout_r = pad_r + 2`. Vias blocked near ALL pads regardless of net.
-
-7. **Via at goal bypassed keepout** - `is_goal` check allowed via on destination pad. Fixed to only allow via at goal for through-hole pads (`end_layer is None`).
-
-### Routing Order Strategy
-
-Route in this order (constrained paths first, flexible paths last):
-1. SR outputs (longest routes, tight-pitch TSSOP endpoints)
-2. Control signals (J1 to U1/U2)
-3. Local nets (ILIM resistors, VM capacitors)
-4. GND (most flexible, many paths available)
-
-### Future Work: Track Spreading
-
-**Goal:** Push tracks away from pads/obstacles into empty space.
-
-**Proposed algorithm:**
-```
-repeat until no movement:
-    for each track cell:
-        direction = away_from_nearest_obstacle
-        move cell 1 step in direction
-        if DRC_fail():
-            undo move
-```
-
-**Key considerations:**
-- Process outer tracks first naturally (iterate until convergence)
-- Vias move with their track cells
-- Tracks may need to grow/shrink to maintain connectivity
-- Straight lines stay straight (all cells move same direction)
-- Curves expand (cells move radially outward)
-- Movement granularity: 0.1mm (1 grid cell)
-- Max expansion: ~5mm (50 cells)
-
-**Complications to solve:**
-- Moving cells can break connectivity
-- May need to add/remove cells to maintain path
-- Vias exist on both layers - both tracks must follow
-- Consider storing tracks as ordered cell paths, move "anchors" (endpoints/vias), then heal connections between
-
-**Simpler first step:** Analyze dpcb file to identify expansion opportunities - measure clearance to nearest obstacle, report where tracks are tight and where space is available.
-
-## Component Placement Analysis Pattern
-
-Before routing, check for **column conflicts** — components that share an x-column across rows will force routes through each other's bodies.
-
-**Think pattern:**
-1. Group components by row (y-band). Identify upper row, lower row, etc.
-2. For each lower-row chip, check if any upper-row chip shares the same x-column (within ~3mm).
-3. If yes: routes from the controller (U1/U2) to the lower-row chip must pass through the upper-row chip body — a **column conflict**.
-4. Resolution: move one of the conflicting chips in x so the routing corridor runs between chips, not through them.
-   - Prefer moving the chip whose existing routes are simpler (fewer segments).
-   - The destination chip can shift toward the controller (smaller route angle) or away — pick whichever keeps it clear of adjacent chips.
-5. Use `check_crowding` after routing to verify — a 0.0mm clearance means a track is passing through a component body. This is always a placement error, not a routing problem.
-
-**Key insight:** routing is automatic and zero-cost. Component placement is the design decision. Always fix placement conflicts before routing, not by routing around them.
-
-## Session: 2026-03-16
-
-### New Module: dpcb_pathset.py
-
-Implemented the track push-out system as `dpcb_pathset.py`. This replaces the speculative "track spreading" algorithm from the 03-15 notes with a keepout-based approach.
-
-**How it works:**
-- `RouteSet` manages a collection of `Route` objects, each a pad-to-pad connection
-- Push-out adds keepout zones (blocked cells) near obstacles/pads, then re-routes through A*
-- Keepouts persist across re-routes so the router doesn't snap back to tight paths
-- The A* router sees keepouts as blocked cells — no changes to the core pathfinder needed
-
-**Key classes:**
-- `Route` — src/dst pad coords + persistent keepout set
-- `RouteSet` — collection of routes, orchestrates add/pushout/re-route
-- `TrackSegment` — output format for dpcb file track lines
-- `tracks_to_dpcb_lines()` — converts grid paths to .dpcb TRACK lines
-
-**Push-out algorithm:**
-1. For each cell on the existing path, measure distance to nearest obstacle
-2. If distance < threshold, place keepout square on the obstacle side
-3. Unroute the track from the grid
-4. Re-route with keepouts applied as additional blocked cells
-5. Repeat up to `amount` iterations
-
-### API Integration
-
-- `dpcb_api.py` updated to use `RouteSet` and `KEEPOUT_NET_ID` from pathset
-- API `route` command now creates Route objects in the RouteSet
-- Push-out can be triggered via API after routing
-
-### dpcb_router.py Changes
-
-- `route_by_name()` function added/updated — routes by net name string, used by API
-- Grid building and A* core unchanged
-
-### Key Files
-
-- `/workspace/utilities/router/dpcb_router.py` - Core A* router, grid management
-- `/workspace/utilities/router/dpcb_viewer.py` - GUI viewer, board parsing
-- `/workspace/utilities/router/dpcb_api.py` - TCP command server
-- `/workspace/demo_2_7seg/test2.dpcb` - Test board (7-segment driver)
-- `/workspace/demo_2_7seg/test2_clean.dpcb` - Test board without tracks
-- `/workspace/demo_2_7seg/test2_routed.dpcb` - Routed result
-
-### Grid Details
+## Grid
 
 - Pitch: 0.1mm per cell
 - Layers: 0=F.Cu, 1=B.Cu
 - `occupy[layer][y, x]`: 0=empty, >0=net_id, -1=obstacle
-- `pad_layers[(gx, gy)]`: 0=F.Cu, 1=B.Cu, None=both (through-hole)
-- `pad_keepout`: set of (gx, gy) where vias blocked
+- `pad_layers[(gx, gy)]`: 0=F.Cu only (SMD), None=both (through-hole)
+- `pad_keepout`: set of (gx, gy) where vias are blocked
+
+## Placement Format
+
+Components positioned by integer grid-cell coordinates in bloom file:
+
+```json
+"placement": {
+  "XU1": {"col": 20, "row": 16, "w": 13, "h": 9},
+  "U4":  {"col": 35, "row": 14, "w": 17, "h": 16}
+}
+```
+
+Resolver: `x_mm = col * SCALE`, `centre = position + size/2`. SCALE = 1.0mm.
+
+## Browser (port 8083)
+
+Interactive viewer with:
+- Right-click drag to pan, left-click drag to move components
+- Mouse wheel zoom (preserved across reloads via sessionStorage)
+- Hover shows pad info + cursor coordinates (x, y) in mm
+- Component outlines drawn as white rectangles
+- R key rotates grabbed component 90 degrees clockwise
+- Auto-reloads on state change (polls /version)
+
+POST `/api`:
+- `{action: "move", ref, dw, dh}` — relative grid-cell move
+- `{action: "rotate", ref}` — 90 degree clockwise rotation
+
+## Agent API (port 8084)
+
+### GET Endpoints
+
+| Path | Returns |
+|------|---------|
+| `/` | Full state (pads, tracks, vias, board, nets, components) |
+| `/version` | `{v: N}` — state version counter |
+| `/status` | Grid stats, track/via/pad/net counts |
+| `/nets` | `{net_name: color, ...}` |
+| `/pads` | All pads `[{ref, pin, name, net, x, y, smd}, ...]` |
+| `/pads/<net>` | Pads for a specific net |
+| `/placement` | All component placements `{ref: {col, row, w, h}, ...}` |
+| `/placement/<ref>` | Single component placement |
+| `/density` | 10mm sector density map — F.Cu/B.Cu occupancy % per sector |
+| `/clearance` | Per-net minimum clearance to nearest foreign obstacle, sorted worst-first |
+| `/orphan_vias` | Vias not connected to any trace endpoint |
+| `/get_vias` | All vias |
+| `/get_transitions` | Layer transition points, flags missing vias |
+| `/nearest_track?net=X&x=N&y=N` | Closest point on any trace of net to (x,y) — for T-junctions |
+| `/save` | Save tracks/vias/placement to bloom file |
+| `/reload` | Reload bloom file and rebuild grid |
+
+### POST Actions
+
+All POST to `/` with JSON body `{action: "...", ...}`.
+
+#### Routing
+
+```json
+{"action": "route", "net": "VCC_3V3", "from": [x1,y1], "to": [x2,y2],
+ "margin": 3, "layer": "auto", "use8": true, "width": 0.25}
+```
+- `margin`: clearance in grid cells (3 = 0.3mm). Always use 3.
+- `layer`: `"F.Cu"`, `"B.Cu"`, or `"auto"` (allows vias)
+- `use8`: 8-direction routing for 45-degree traces
+- Endpoints snap to nearest pad on the net
+
+```json
+{"action": "route_tap", "net": "GND", "from": [x,y], "margin": 3}
+```
+Route from a pad to the nearest existing trace on its net.
+
+```json
+{"action": "unroute", "net": "GND"}
+```
+Remove all tracks and vias for a net.
+
+#### Placement
+
+```json
+{"action": "move", "ref": "XU1", "dw": 2, "dh": -1}
+```
+Relative move — adjusts col/row by delta grid cells.
+
+```json
+{"action": "place", "ref": "XU1", "col": 10, "row": 5}
+```
+Absolute placement — sets col/row directly.
+
+```json
+{"action": "rotate", "ref": "XU1"}
+```
+Rotate 90 degrees clockwise. Swaps w/h in placement, updates component rotation.
+
+#### Via
+
+```json
+{"action": "place_via", "net": "GND", "x": 10.3, "y": 34.0}
+```
+Place a via at a specific point. Use `/orphan_vias` to check for unconnected vias.
+
+#### Markers (viewer annotations)
+
+```json
+{"action": "mark", "x": 23.5, "y": 8.0, "color": "#ff0000", "label": "here", "size": 2}
+```
+Place a colored dot with optional label. `size` scales dot, font, and line (1=normal, 2=double).
+Optional `lx`/`ly` draws a line from dot to that point.
+
+```json
+{"action": "clear_marks"}
+```
+Remove all markers.
+
+#### Highlight
+
+```json
+{"action": "highlight", "net": "SPI_NSS"}
+```
+Highlight a net in the viewer. Send `"net": ""` to clear.
+
+#### Other
+
+```json
+{"action": "save"}
+{"action": "reload"}
+```
+
+## Routing Strategy
+
+1. **Fan-out from IC pads** — short stubs perpendicular to IC edge before routing to destination. Prevents traces running parallel along pad rows blocking access.
+
+2. **Route order matters** — route innermost/most-constrained traces first. Outer traces route around them.
+
+3. **Stub + via + B.Cu pattern** for GND:
+   - Short F.Cu stub from pad
+   - `place_via` at stub endpoint
+   - B.Cu trace between vias
+   - `place_via` at other end
+   - F.Cu stub to next pad
+
+4. **Use `use8: true`** for 45-degree traces after fan-out stubs.
+
+5. **Waypoint routing** — for traces that must avoid IC pin rows, route to a waypoint below/above the IC extent first, then to destination.
+
+6. **Always margin=3** (0.3mm clearance). Don't reduce margin to force routes.
+
+7. **Save + reload after rotate/move** before routing — grid must be rebuilt with updated pad positions.
+
+8. **No traces between U4 (RA01) pins** — pads too close. Fan out with stubs away from IC body.
+
+## Routing Strategy
+
+9. **Graduated fan-out** — when multiple stubs fan out from an IC, graduate
+   lengths so the top stub is longest. Spreads corridors for the router.
+
+10. **T-junctions via nearest_track** — use `/nearest_track` to find closest
+    point on existing trace, route branch to that point. Cleaner than routing
+    two branches to the same pad.
+
+11. **Chamfering** — replace right-angle corners with 45-degree segments.
+    dx must equal dy for true diagonal (e.g. 2mm H + 2mm V = one diagonal).
+    Use `use8: true` for the chamfer segment.
+
+12. **Stubs before auto-route** — always create explicit stubs away from IC
+    pins before letting the auto-router find the path. Prevents traces running
+    between pins.
+
+## Diagnostics
+
+- `GET /clearance` — audit trace quality, fix worst-first
+- `GET /density` — spatial awareness before routing, find clear corridors
+- `GET /orphan_vias` — find unconnected vias after routing
+- `GET /get_transitions` — verify vias at layer transitions
+- `GET /nearest_track` — find T-junction points for branch routing
+- `POST mark/clear_marks` — annotate viewer to communicate areas of interest

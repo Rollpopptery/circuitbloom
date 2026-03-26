@@ -1,216 +1,240 @@
 #!/usr/bin/env python3
 """
-autoroute.py — Route all nets on a loaded board via the TCP API.
+autoroute.py — Route all multi-pad nets in one pass.
 
-Computes pad positions from the .dpcb file, then sends route commands
-in priority order: local nets first, signals, power last.
+Reads pad positions from the route server, builds a routing plan
+(shortest nets first), routes them all, reports results.
 
 Usage:
-    python3 autoroute.py [host] [port]
-    python3 autoroute.py                   # defaults: 172.17.0.1:9876
-    python3 autoroute.py localhost 9876    # direct host access
+    python3 autoroute.py                  # route all unrouted nets
+    python3 autoroute.py --all            # unroute everything first, then route all
+    python3 autoroute.py --order short    # shortest nets first (default)
+    python3 autoroute.py --order long     # longest nets first
+    python3 autoroute.py --layer auto     # layer mode (default: auto)
+    python3 autoroute.py --margin 3       # routing margin (default: 3)
+
+Environment:
+    ROUTE_HOST  — server host (default: 172.17.0.1)
+    ROUTE_PORT  — agent port (default: 8084)
 """
 
-import socket
-import sys
-import re
+import json
 import math
+import os
+import sys
 import time
+import urllib.request
+
+HOST = os.environ.get('ROUTE_HOST', '172.17.0.1')
+PORT = int(os.environ.get('ROUTE_PORT', '8084'))
+BASE = f'http://{HOST}:{PORT}'
 
 
-# ============ DPCB PARSING (minimal, just for pad positions) ============
-
-def rotate_pad(dx, dy, angle_deg):
-    """Rotate pad offset using KiCad's CLOCKWISE convention (Y-down screen space)."""
-    a = math.radians(angle_deg)
-    cos_a = round(math.cos(a), 6)
-    sin_a = round(math.sin(a), 6)
-    return round(dx * cos_a + dy * sin_a, 4), round(-dx * sin_a + dy * cos_a, 4)
+def api_get(path):
+    with urllib.request.urlopen(f'{BASE}{path}', timeout=10) as resp:
+        return json.loads(resp.read())
 
 
-def parse_board(path):
-    """Parse .dpcb, return dict of ref.pin -> (x, y) and net definitions."""
-    with open(path) as f:
-        text = f.read()
+def api_post(data):
+    req = urllib.request.Request(
+        BASE, data=json.dumps(data).encode(),
+        headers={'Content-Type': 'application/json'},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read())
 
-    footprints = []   # (ref, lib, footprint, x, y, rotation)
-    pad_defs = {}     # footprint_name -> [(pin, dx, dy), ...]
-    nets = []         # (net_name, [(ref, pin), ...])
 
-    for line in text.split('\n'):
-        line = re.sub(r'#.*$', '', line).strip()
-        if not line:
+def get_net_plan(state):
+    """Build routing plan from board state.
+
+    Returns list of nets, each with pad positions and nearest-neighbour chain.
+    Only multi-pad nets included.
+    """
+    pads = state['pads']
+    tracks = state['tracks']
+
+    net_pads = {}
+    for p in pads:
+        if not p['net']:
+            continue
+        net_pads.setdefault(p['net'], []).append(p)
+
+    routed_nets = {t['net'] for t in tracks}
+
+    plan = []
+    for net, pad_list in net_pads.items():
+        if len(pad_list) < 2:
             continue
 
-        m = re.match(r'^FP:([^:]+):([^:]+):([^@]+)@\(([^,]+),([^)]+)\)(?::r(\d+))?', line)
-        if m:
-            footprints.append((
-                m.group(1), m.group(2), m.group(3),
-                float(m.group(4)), float(m.group(5)),
-                int(m.group(6)) if m.group(6) else 0
-            ))
+        # Nearest-neighbour chain
+        total_dist = 0
+        remaining = list(pad_list)
+        current = remaining.pop(0)
+        chain = [current]
+        while remaining:
+            best_d = float('inf')
+            best_i = 0
+            for i, p in enumerate(remaining):
+                d = math.hypot(p['x'] - current['x'], p['y'] - current['y'])
+                if d < best_d:
+                    best_d = d
+                    best_i = i
+            total_dist += best_d
+            current = remaining.pop(best_i)
+            chain.append(current)
+
+        plan.append({
+            'net': net,
+            'pads': pad_list,
+            'chain': chain,
+            'est_length': total_dist,
+            'routed': net in routed_nets,
+        })
+
+    return plan
+
+
+def _find_furthest_pair(pads):
+    """Find the two pads with the greatest distance — the spine endpoints."""
+    best_d = -1
+    best_i, best_j = 0, 1
+    for i in range(len(pads)):
+        for j in range(i + 1, len(pads)):
+            d = math.hypot(pads[i]['x'] - pads[j]['x'],
+                           pads[i]['y'] - pads[j]['y'])
+            if d > best_d:
+                best_d = d
+                best_i, best_j = i, j
+    return best_i, best_j
+
+
+def route_net(net_info, layer, margin, use8=False):
+    """Route a single net: spine between furthest pads, then tap the rest.
+
+    Returns list of route results.
+    """
+    pads = net_info['pads']
+    net = net_info['net']
+    results = []
+
+    base_cmd = {'action': 'route', 'net': net, 'layer': layer, 'margin': margin}
+    if use8:
+        base_cmd['use8'] = True
+
+    if len(pads) == 2:
+        r = api_post({**base_cmd,
+            'from': [pads[0]['x'], pads[0]['y']],
+            'to': [pads[1]['x'], pads[1]['y']],
+        })
+        results.append(r)
+        return results
+
+    # 3+ pads: route spine (furthest pair), then tap remaining
+    si, sj = _find_furthest_pair(pads)
+    spine_a = pads[si]
+    spine_b = pads[sj]
+
+    r = api_post({**base_cmd,
+        'from': [spine_a['x'], spine_a['y']],
+        'to': [spine_b['x'], spine_b['y']],
+    })
+    results.append(r)
+
+    # Tap remaining pads into the spine
+    tap_cmd = {'action': 'route_tap', 'net': net, 'layer': layer, 'margin': margin}
+    for i, p in enumerate(pads):
+        if i == si or i == sj:
             continue
+        r = api_post({**tap_cmd, 'from': [p['x'], p['y']]})
+        if not r.get('ok'):
+            da = math.hypot(p['x'] - spine_a['x'], p['y'] - spine_a['y'])
+            db = math.hypot(p['x'] - spine_b['x'], p['y'] - spine_b['y'])
+            target = spine_a if da < db else spine_b
+            r = api_post({**base_cmd,
+                'from': [p['x'], p['y']],
+                'to': [target['x'], target['y']],
+            })
+        results.append(r)
 
-        m = re.match(r'^PADS:([^:]+):([^:]+):(.+)$', line)
-        if m:
-            key = m.group(2)
-            pads = []
-            for pm in re.finditer(r'(\d+)@\(([^,]+),([^)]+)\)', m.group(3)):
-                pads.append((int(pm.group(1)), float(pm.group(2)), float(pm.group(3))))
-            pad_defs[key] = pads
-            continue
-
-        m = re.match(r'^NET:([^:]+):(.+)$', line)
-        if m:
-            pad_refs = []
-            for p in m.group(2).split(','):
-                p = p.strip()
-                ref, pin = p.rsplit('.', 1)
-                pad_refs.append((ref, int(pin)))
-            nets.append((m.group(1), pad_refs))
-
-    # Compute absolute pad positions
-    pad_pos = {}  # "ref.pin" -> (x, y)
-    for ref, lib, fp_name, fx, fy, rot in footprints:
-        for pin, dx, dy in pad_defs.get(fp_name, []):
-            rx, ry = rotate_pad(dx, dy, rot)
-            pad_pos[f"{ref}.{pin}"] = (round(fx + rx, 4), round(fy + ry, 4))
-
-    return pad_pos, nets
-
-
-# ============ TCP CLIENT ============
-
-class ApiClient:
-    def __init__(self, host, port):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((host, port))
-        self.sock.settimeout(30)
-        self.buf = ""
-
-    def cmd(self, command):
-        self.sock.sendall((command + '\n').encode())
-        # Read until newline
-        while '\n' not in self.buf:
-            data = self.sock.recv(8192).decode()
-            if not data:
-                break
-            self.buf += data
-        if '\n' in self.buf:
-            line, self.buf = self.buf.split('\n', 1)
-            return line.strip()
-        return self.buf.strip()
-
-    def close(self):
-        self.sock.close()
-
-
-# ============ ROUTING ============
-
-def route_net(client, net_name, pads, pad_pos, layer='auto'):
-    """Route a net by chaining pad-to-pad segments."""
-    # Get positions for all pads
-    positions = []
-    for ref, pin in pads:
-        key = f"{ref}.{pin}"
-        if key in pad_pos:
-            positions.append((key, pad_pos[key]))
-        else:
-            print(f"  WARNING: no position for {key}")
-
-    if len(positions) < 2:
-        return True  # single-pad net, nothing to route
-
-    # Chain: route p0->p1, p1->p2, etc.
-    all_ok = True
-    for i in range(len(positions) - 1):
-        name_a, (x1, y1) = positions[i]
-        name_b, (x2, y2) = positions[i + 1]
-        cmd = f"route {net_name} {x1},{y1} {x2},{y2} {layer}"
-        resp = client.cmd(cmd)
-        ok = resp.startswith('OK')
-        status = "OK" if ok else "FAIL"
-        print(f"  {name_a} -> {name_b}: {resp}")
-        if not ok:
-            all_ok = False
-    return all_ok
+    return results
 
 
 def main():
-    host = sys.argv[1] if len(sys.argv) > 1 else '172.17.0.1'
-    port = int(sys.argv[2]) if len(sys.argv) > 2 else 9876
+    import argparse
+    parser = argparse.ArgumentParser(description='Autoroute all nets')
+    parser.add_argument('--all', action='store_true', help='Unroute everything first')
+    parser.add_argument('--order', default='short', choices=['short', 'long'],
+                        help='Routing order (default: short)')
+    parser.add_argument('--layer', default='auto', help='Layer mode (default: auto)')
+    parser.add_argument('--margin', type=int, default=3, help='Routing margin (default: 3)')
+    parser.add_argument('--use8', action='store_true', help='Use 8-direction (diagonal) routing')
+    args = parser.parse_args()
 
-    # Parse board file for pad positions
-    board_path = '/workspace/demo_2_7seg/test2.dpcb'
-    print(f"Parsing {board_path}...")
-    pad_pos, nets = parse_board(board_path)
-    print(f"  {len(pad_pos)} pads, {len(nets)} nets")
+    state = api_get('/')
+    plan = get_net_plan(state)
 
-    # Connect
-    print(f"\nConnecting to {host}:{port}...")
-    client = ApiClient(host, port)
-    print(f"  Status: {client.cmd('status')}")
+    if args.order == 'short':
+        plan.sort(key=lambda n: n['est_length'])
+    else:
+        plan.sort(key=lambda n: -n['est_length'])
 
-    # Classify nets
-    local_nets = []      # 2-pad short nets (ILIM, VM)
-    signal_nets = []     # SR outputs, data, clk, etc.
-    power_nets = []      # VCC, GND
-    single_nets = []     # single-pad (nothing to route)
+    if args.all:
+        for net_info in plan:
+            api_post({'action': 'unroute', 'net': net_info['net']})
+        to_route = plan
+    else:
+        to_route = [n for n in plan if not n['routed']]
 
-    net_dict = {name: pads for name, pads in nets}
+    if not to_route:
+        print('Nothing to route.')
+        return
 
-    for name, pads in nets:
-        if len(pads) < 2:
-            single_nets.append(name)
-        elif name in ('VCC', 'GND'):
-            power_nets.append(name)
-        elif name.startswith('Net-('):
-            local_nets.append(name)
+    print(f'Routing {len(to_route)} net(s), order={args.order}, '
+          f'layer={args.layer}, margin={args.margin}')
+    print()
+
+    t0 = time.perf_counter()
+    successes = 0
+    failures = 0
+    total_length = 0
+    total_vias = 0
+    total_segs = 0
+    failed_nets = []
+
+    for net_info in to_route:
+        net = net_info['net']
+        n_pads = len(net_info['pads'])
+
+        results = route_net(net_info, args.layer, args.margin, args.use8)
+
+        all_ok = all(r.get('ok') for r in results)
+        net_length = sum(r.get('length', 0) for r in results)
+        net_vias = sum(r.get('vias', 0) for r in results)
+        net_segs = sum(r.get('segments', 0) for r in results)
+
+        if all_ok:
+            successes += 1
+            total_length += net_length
+            total_vias += net_vias
+            total_segs += net_segs
+            print(f'  OK   {net:15s}  {n_pads}p  {net_length:6.1f}mm  {net_segs}seg  {net_vias}via')
         else:
-            signal_nets.append(name)
+            failures += 1
+            failed_nets.append(net)
+            ok_count = sum(1 for r in results if r.get('ok'))
+            print(f'  FAIL {net:15s}  {n_pads}p  ({ok_count}/{len(results)} legs)')
+            for r in results:
+                if not r.get('ok'):
+                    print(f'         {r.get("message", "?")}')
 
-    print(f"\nRouting plan:")
-    print(f"  Local (short):  {len(local_nets)} nets")
-    print(f"  Signal:         {len(signal_nets)} nets")
-    print(f"  Power:          {len(power_nets)} nets")
-    print(f"  Single-pad:     {len(single_nets)} (skip)")
+    elapsed = time.perf_counter() - t0
 
-    # 1. Local nets first
-    print(f"\n{'='*50}")
-    print(f"PHASE 1: Local nets")
-    print(f"{'='*50}")
-    for name in local_nets:
-        print(f"\n[{name}]")
-        route_net(client, name, net_dict[name], pad_pos)
-
-    # 2. Signal nets
-    print(f"\n{'='*50}")
-    print(f"PHASE 2: Signal nets")
-    print(f"{'='*50}")
-    for name in signal_nets:
-        print(f"\n[{name}]")
-        route_net(client, name, net_dict[name], pad_pos)
-
-    # 3. Power nets
-    print(f"\n{'='*50}")
-    print(f"PHASE 3: Power nets")
-    print(f"{'='*50}")
-    for name in power_nets:
-        print(f"\n[{name}]")
-        route_net(client, name, net_dict[name], pad_pos)
-
-    # Final status
-    print(f"\n{'='*50}")
-    print(f"DONE")
-    print(f"{'='*50}")
-    print(client.cmd('status'))
-
-    # Save
-    save_path = '/workspace/demo_2_7seg/test2_autorouted.dpcb'
-    print(f"\nSaving to {save_path}...")
-    print(client.cmd(f'save {save_path}'))
-
-    client.close()
+    print()
+    print(f'Done in {elapsed*1000:.0f}ms')
+    print(f'  Routed: {successes}/{successes + failures}  '
+          f'Length: {total_length:.1f}mm  Segs: {total_segs}  Vias: {total_vias}')
+    if failed_nets:
+        print(f'  Failed: {", ".join(failed_nets)}')
 
 
 if __name__ == '__main__':

@@ -6,3 +6,4 @@
 !LICENSE
 temp/
 .venv/
+!*.html

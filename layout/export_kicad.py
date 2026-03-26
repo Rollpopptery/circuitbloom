@@ -7,6 +7,7 @@ Uses kipy to move and rotate components in a running KiCad instance.
 """
 
 import sys
+import glob
 import json
 import math
 import time
@@ -33,9 +34,13 @@ def main():
     # Component table — for rotations
     comp_table = state.get("components", {})
 
-    # Connect to KiCad
+    # Connect to KiCad (must use editor socket, not main api.sock)
     print("Connecting to KiCad...")
-    kicad = kipy.KiCad()
+    socks = glob.glob('/tmp/kicad/api-*.sock')
+    if not socks:
+        print("No KiCad PCB editor socket found in /tmp/kicad/", file=sys.stderr)
+        sys.exit(1)
+    kicad = kipy.KiCad(socket_path='ipc://' + socks[0])
     board = kicad.get_board()
     footprints = board.get_footprints()
 
@@ -46,20 +51,31 @@ def main():
         fp_lookup[ref] = fp
 
     # Find board origin from board outline (Edge.Cuts)
+    # Board outline may be a rectangle or line segments — handle both
     shapes = board.get_shapes()
-    edge_x = []
-    edge_y = []
+    origin_x = None
+    origin_y = None
     for s in shapes:
-        edge_x.extend([s.start.x, s.end.x])
-        edge_y.extend([s.start.y, s.end.y])
+        if hasattr(s, 'top_left'):
+            # BoardRectangle
+            origin_x = s.top_left.x
+            origin_y = s.top_left.y
+            break
+        elif hasattr(s, 'start'):
+            # Line segments — collect all endpoints, take min
+            if origin_x is None:
+                edge_x, edge_y = [], []
+            edge_x.extend([s.start.x, s.end.x])
+            edge_y.extend([s.start.y, s.end.y])
 
-    if edge_x and edge_y:
-        origin_x = min(edge_x)
-        origin_y = min(edge_y)
-    else:
-        print("  WARNING: no board outline found, using (0,0)")
-        origin_x = 0
-        origin_y = 0
+    if origin_x is None:
+        if 'edge_x' in dir() and edge_x:
+            origin_x = min(edge_x)
+            origin_y = min(edge_y)
+        else:
+            print("  WARNING: no board outline found, using (0,0)")
+            origin_x = 0
+            origin_y = 0
 
     print(f"Board origin: ({origin_x/1e6:.2f}, {origin_y/1e6:.2f}) mm")
 

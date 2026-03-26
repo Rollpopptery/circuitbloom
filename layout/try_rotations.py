@@ -7,6 +7,7 @@ Usage:
 """
 
 import sys
+import glob
 import json
 import math
 import urllib.request
@@ -80,7 +81,10 @@ def main():
         print("Usage: python try_rotations.py U2 [U1 ...]")
         sys.exit(1)
 
-    kicad = kipy.KiCad()
+    socks = glob.glob('/tmp/kicad/api-*.sock')
+    if not socks:
+        raise RuntimeError('No KiCad PCB editor socket found in /tmp/kicad/')
+    kicad = kipy.KiCad(socket_path='ipc://' + socks[0])
     board = kicad.get_board()
 
     # Get current state

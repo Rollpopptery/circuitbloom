@@ -232,6 +232,81 @@ def parse_rules_line(line):
 
 
 # ---------------------------------------------------------------------------
+# .bloom parser — produces the same dict structure as parse_dpcb()
+# ---------------------------------------------------------------------------
+
+def parse_bloom(text):
+    """Parse a .bloom JSON file into the same structure as parse_dpcb()."""
+    import json
+    bloom = json.loads(text)
+
+    result = {
+        'footprints': {},
+        'nets': {},
+        'tracks': [],
+        'vias': [],
+        'zones': [],
+        'board': None,
+        'layers': 2,
+        'rules': {},
+    }
+
+    # Board size
+    pcb = bloom.get('pcb', {})
+    board = pcb.get('board')
+    if board:
+        result['board'] = (board[0], board[1])
+
+    result['layers'] = pcb.get('layers', 2)
+    result['rules'] = pcb.get('rules', {})
+
+    # Footprints from components
+    components = bloom.get('components', {})
+    for ref, comp in components.items():
+        pos = comp.get('position', {})
+        result['footprints'][ref] = {
+            'ref': ref,
+            'lib': comp.get('package', ''),
+            'x': pos.get('x', 0),
+            'y': pos.get('y', 0),
+            'rotation': comp.get('rotation', 0),
+            'layer': comp.get('layer', 'F.Cu'),
+        }
+
+    # Nets from pin assignments
+    nets = {}
+    for ref, comp in components.items():
+        for pin_num, pin in comp.get('pins', {}).items():
+            net = pin.get('net')
+            if net:
+                if net not in nets:
+                    nets[net] = []
+                nets[net].append((ref, pin_num))
+    result['nets'] = nets
+
+    # Tracks
+    for trk in pcb.get('tracks', []):
+        result['tracks'].append({
+            'x1': trk['x1'], 'y1': trk['y1'],
+            'x2': trk['x2'], 'y2': trk['y2'],
+            'width': trk.get('width', 0.25),
+            'layer': trk.get('layer', 'F.Cu'),
+            'net': trk.get('net', ''),
+        })
+
+    # Vias
+    for via in pcb.get('vias', []):
+        result['vias'].append({
+            'x': via['x'], 'y': via['y'],
+            'drill': via.get('drill', 0.3),
+            'annular': via.get('annular', 0.15),
+            'net': via.get('net', ''),
+        })
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # .kicad_pcb text manipulation
 # ---------------------------------------------------------------------------
 
@@ -631,10 +706,10 @@ def patch_pcb(pcb_text, dpcb):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Patch a .kicad_pcb with layout changes from a .dpcb file"
+        description="Patch a .kicad_pcb with layout changes from a .dpcb or .bloom file"
     )
     parser.add_argument("base_pcb", help="Input .kicad_pcb (provides footprint geometry)")
-    parser.add_argument("dpcb",     help="Input .dpcb (provides layout intent)")
+    parser.add_argument("design",   help="Input .dpcb or .bloom (provides layout intent)")
     parser.add_argument("-o", "--output", required=True, help="Output .kicad_pcb")
     parser.add_argument("--viewport-x", type=float, default=120.0,
                         help="Viewport X offset in mm (default 120.0)")
@@ -648,20 +723,23 @@ def main():
     VIEWPORT_Y = args.viewport_y
 
     base_path   = Path(args.base_pcb)
-    dpcb_path   = Path(args.dpcb)
+    design_path = Path(args.design)
     output_path = Path(args.output)
 
     if not base_path.exists():
         print(f"Error: {base_path} not found", file=sys.stderr)
         sys.exit(1)
-    if not dpcb_path.exists():
-        print(f"Error: {dpcb_path} not found", file=sys.stderr)
+    if not design_path.exists():
+        print(f"Error: {design_path} not found", file=sys.stderr)
         sys.exit(1)
 
-    pcb_text  = base_path.read_text(encoding='utf-8')
-    dpcb_text = dpcb_path.read_text(encoding='utf-8')
-    dpcb      = parse_dpcb(dpcb_text)
-    print(len(dpcb['footprints']), len(dpcb['tracks']))
+    pcb_text    = base_path.read_text(encoding='utf-8')
+    design_text = design_path.read_text(encoding='utf-8')
+
+    if design_path.suffix == '.bloom':
+        dpcb = parse_bloom(design_text)
+    else:
+        dpcb = parse_dpcb(design_text)
 
     result = patch_pcb(pcb_text, dpcb)
     output_path.write_text(result, encoding='utf-8')
@@ -670,7 +748,7 @@ def main():
     n_trk  = len(dpcb['tracks'])
     n_via  = len(dpcb['vias'])
     n_zone = len(dpcb['zones'])
-    print(f"Patched: {base_path} + {dpcb_path} -> {output_path}", file=sys.stderr)
+    print(f"Patched: {base_path} + {design_path} -> {output_path}", file=sys.stderr)
     print(f"  {n_fp} footprints repositioned", file=sys.stderr)
     print(f"  {n_trk} tracks, {n_via} vias, {n_zone} zones", file=sys.stderr)
 

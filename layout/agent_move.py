@@ -10,6 +10,7 @@ Usage:
 """
 
 import sys
+import glob
 import json
 import subprocess
 import urllib.request
@@ -91,7 +92,10 @@ def print_tree(node, indent=0):
 
 def get_ratline_total(ignore_nets):
     """Connect to KiCad and compute total MST ratline length."""
-    kicad = kipy.KiCad()
+    socks = glob.glob('/tmp/kicad/api-*.sock')
+    if not socks:
+        raise RuntimeError('No KiCad PCB editor socket found in /tmp/kicad/')
+    kicad = kipy.KiCad(socket_path='ipc://' + socks[0])
     board = kicad.get_board()
 
     pad_id_to_ref = {}

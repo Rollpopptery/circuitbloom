@@ -13,6 +13,7 @@ Usage:
 """
 
 import sys
+import glob
 import math
 import kipy
 
@@ -78,7 +79,10 @@ def main():
     global IGNORE_NETS
     IGNORE_NETS = parse_ignore_nets()
 
-    kicad = kipy.KiCad()
+    socks = glob.glob('/tmp/kicad/api-*.sock')
+    if not socks:
+        raise RuntimeError('No KiCad PCB editor socket found in /tmp/kicad/')
+    kicad = kipy.KiCad(socket_path='ipc://' + socks[0])
     board = kicad.get_board()
 
     # Build pad ID -> ref lookup via footprint definitions

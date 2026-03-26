@@ -565,11 +565,27 @@ def route_tap_by_name(grid, net_name, x1_mm, y1_mm,
     if not nid:
         return RouteResult(False, message=f"Unknown net: {net_name}")
     gx1, gy1 = grid.mm_to_grid(x1_mm, y1_mm)
-    start_layer = grid.pad_layers.get((gx1, gy1))
+    start_layer = _find_pad_layer(grid, gx1, gy1)
     return route_tap(grid, x1_mm, y1_mm, nid,
                      layer_mode=layer_mode,
                      start_layer=start_layer,
                      margin_override=margin_override)
+
+
+def _find_pad_layer(grid, gx, gy, search_r=2):
+    """Look up pad layer, searching nearby cells for floating-point rounding mismatches."""
+    result = grid.pad_layers.get((gx, gy))
+    if result is not None:
+        return result
+    # Search nearby cells (rounding can be off by 1)
+    for dy in range(-search_r, search_r + 1):
+        for dx in range(-search_r, search_r + 1):
+            if dx == 0 and dy == 0:
+                continue
+            result = grid.pad_layers.get((gx + dx, gy + dy))
+            if result is not None:
+                return result
+    return None  # not a pad or through-hole
 
 
 def route_by_name(grid, net_name, x1_mm, y1_mm, x2_mm, y2_mm,
@@ -581,8 +597,8 @@ def route_by_name(grid, net_name, x1_mm, y1_mm, x2_mm, y2_mm,
     # Look up pad layers for start/end points
     gx1, gy1 = grid.mm_to_grid(x1_mm, y1_mm)
     gx2, gy2 = grid.mm_to_grid(x2_mm, y2_mm)
-    start_layer = grid.pad_layers.get((gx1, gy1))  # None if not a pad or through-hole
-    end_layer = grid.pad_layers.get((gx2, gy2))
+    start_layer = _find_pad_layer(grid, gx1, gy1)
+    end_layer = _find_pad_layer(grid, gx2, gy2)
     return route(grid, x1_mm, y1_mm, x2_mm, y2_mm, nid,
                  layer_mode, via_cost, track_width_cells,
                  start_layer=start_layer, end_layer=end_layer,
