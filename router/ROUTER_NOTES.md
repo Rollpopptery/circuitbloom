@@ -11,6 +11,8 @@
 - `tree_to_xy.py` — Placement resolver (grid-cell to mm)
 - `dpcb_router.py` — Core A* router, grid management
 - `dpcb_router8.py` — 8-direction A* router (45-degree traces)
+- `grab_layer.py` — KiCad IPC capture (pads, tracks, vias, copper grids)
+- `kicad_route.py` — Push routes to KiCad (tracks, vias, delete)
 
 ## Grid
 
@@ -35,17 +37,13 @@ Resolver: `x_mm = col * SCALE`, `centre = position + size/2`. SCALE = 1.0mm.
 
 ## Browser (port 8083)
 
-Interactive viewer with:
-- Right-click drag to pan, left-click drag to move components
+Interactive viewer (view-only mode — editing done in KiCad):
+- Right-click drag to pan
 - Mouse wheel zoom (preserved across reloads via sessionStorage)
 - Hover shows pad info + cursor coordinates (x, y) in mm
-- Component outlines drawn as white rectangles
-- R key rotates grabbed component 90 degrees clockwise
+- Toggle buttons: F.Cu, B.Cu, Labels, Ratsnest, Pads
+- Pads overlay shows rasterized copper shapes (red=F.Cu, blue=B.Cu, purple=both), enabled by default
 - Auto-reloads on state change (polls /version)
-
-POST `/api`:
-- `{action: "move", ref, dw, dh}` — relative grid-cell move
-- `{action: "rotate", ref}` — 90 degree clockwise rotation
 
 ## Agent API (port 8084)
 
@@ -67,8 +65,12 @@ POST `/api`:
 | `/get_vias` | All vias |
 | `/get_transitions` | Layer transition points, flags missing vias |
 | `/nearest_track?net=X&x=N&y=N` | Closest point on any trace of net to (x,y) — for T-junctions |
+| `/footprints` | All footprint mappings `{package: {kicad_mod, pads}, ...}` |
 | `/save` | Save tracks/vias/placement to bloom file |
 | `/reload` | Reload bloom file and rebuild grid |
+| `/capture_kicad` | Capture board state from running KiCad (pads, tracks, vias, copper heatmap) |
+| `/capture_kicad?socket=<path>` | Capture with explicit socket path (e.g. `ipc:///tmp/kicad/api-41011.sock`) |
+| `/push_kicad` | Push all tracks and vias from server state to KiCad |
 
 ### POST Actions
 
@@ -80,7 +82,7 @@ All POST to `/` with JSON body `{action: "...", ...}`.
 {"action": "route", "net": "VCC_3V3", "from": [x1,y1], "to": [x2,y2],
  "margin": 3, "layer": "auto", "use8": true, "width": 0.25}
 ```
-- `margin`: clearance in grid cells (3 = 0.3mm). Always use 3.
+- `margin`: clearance in grid cells (1=0.1mm, 2=0.2mm, 3=0.3mm, etc). Default 3, reduce for tight areas.
 - `layer`: `"F.Cu"`, `"B.Cu"`, or `"auto"` (allows vias)
 - `use8`: 8-direction routing for 45-degree traces
 - Endpoints snap to nearest pad on the net
@@ -93,7 +95,43 @@ Route from a pad to the nearest existing trace on its net.
 ```json
 {"action": "unroute", "net": "GND"}
 ```
-Remove all tracks and vias for a net.
+Remove all tracks and vias for a net. Returns `impact` showing clearance improvements.
+
+**Route Response — Design Impact**
+
+Both `route` and `route_tap` return an `impact` object showing how the routing
+affected the overall design state:
+
+```json
+{
+  "ok": true,
+  "message": "routed 15.2mm via B.Cu",
+  "length": 15.2,
+  "vias": 2,
+  "segments": 5,
+  "impact": {
+    "overall_min": {"before": 0.4, "after": 0.25},
+    "new_route": {
+      "net": "SPI_MOSI",
+      "clearance": 0.25,
+      "at": [20.3, 15.1],
+      "layer": "F.Cu"
+    },
+    "degraded": [
+      {"net": "GND", "before": 0.5, "after": 0.25, "delta": -0.25, "at": [20.5, 15.0], "layer": "F.Cu"}
+    ],
+    "improved": [],
+    "tracks_added": 5,
+    "vias_added": 2
+  }
+}
+```
+
+- `overall_min`: Global minimum clearance before/after this route
+- `new_route`: Clearance info for the just-routed net
+- `degraded`: Other nets whose clearance got worse (ripple effects)
+- `improved`: Other nets whose clearance improved (rare)
+- `tracks_added/vias_added`: What was added by this route action
 
 #### Placement
 
@@ -119,6 +157,15 @@ Rotate 90 degrees clockwise. Swaps w/h in placement, updates component rotation.
 ```
 Place a via at a specific point. Use `/orphan_vias` to check for unconnected vias.
 
+#### Footprints
+
+```json
+{"action": "set_footprint", "package": "0805", "kicad_mod": "LED_SMD.pretty/LED_0805_2012Metric.kicad_mod"}
+```
+Set or modify the KiCad footprint path for a package. The `kicad_mod` path is relative
+to the KiCad footprints folder. Use `GET /footprints` to list current mappings.
+Changes are in-memory until `save` is called.
+
 #### Markers (viewer annotations)
 
 ```json
@@ -138,6 +185,23 @@ Remove all markers.
 {"action": "highlight", "net": "SPI_NSS"}
 ```
 Highlight a net in the viewer. Send `"net": ""` to clear.
+
+#### KiCad Capture & Push
+
+```json
+{"action": "capture_kicad"}
+{"action": "capture_kicad", "socket": "ipc:///tmp/kicad/api-41011.sock"}
+```
+Capture board state from running KiCad PCB editor via IPC API. Populates pads, tracks,
+vias, nets, components, and generates a copper heatmap overlay. Socket auto-detects
+from `/tmp/kicad/api-*.sock` if not specified.
+
+```json
+{"action": "push_kicad"}
+{"action": "push_kicad", "socket": "ipc:///tmp/kicad/api-41011.sock"}
+```
+Push all tracks and vias from server state to KiCad. Coordinates are converted back
+to absolute KiCad coordinates using the origin saved during capture.
 
 #### Other
 
@@ -163,7 +227,7 @@ Highlight a net in the viewer. Send `"net": ""` to clear.
 
 5. **Waypoint routing** — for traces that must avoid IC pin rows, route to a waypoint below/above the IC extent first, then to destination.
 
-6. **Always margin=3** (0.3mm clearance). Don't reduce margin to force routes.
+6. **Default margin=3** (0.3mm clearance). Reduce to 2 for tight areas if needed, but verify board house minimums.
 
 7. **Save + reload after rotate/move** before routing — grid must be rebuilt with updated pad positions.
 
@@ -194,3 +258,59 @@ Highlight a net in the viewer. Send `"net": ""` to clear.
 - `GET /get_transitions` — verify vias at layer transitions
 - `GET /nearest_track` — find T-junction points for branch routing
 - `POST mark/clear_marks` — annotate viewer to communicate areas of interest
+
+## KiCad IPC Integration
+
+The server can capture board state directly from a running KiCad PCB editor using the
+IPC API via the `kipy` library (`pip install kicad-python`).
+
+### Socket Selection
+
+KiCad creates multiple sockets in `/tmp/kicad/`:
+- `api.sock` — KiCad launcher (NO board commands)
+- `api-XXXXX.sock` — PCB Editor (HAS board commands) ← use this one
+
+The `/capture_kicad` endpoint auto-detects the numbered socket.
+
+### Copper Heatmap
+
+The capture rasterizes actual copper shapes onto 0.1mm pitch grids:
+- Pad polygons via `board.get_pad_shapes_as_polygons()`
+- Track segments with actual width
+- Via circles with actual diameter
+
+The heatmap PNG overlay shows:
+- **Red** — F.Cu copper only
+- **Blue** — B.Cu copper only
+- **Purple** — Both layers (overlap)
+
+Toggle with the "Pads" button in the viewer toolbar (enabled by default).
+
+### grab_layer.py Functions
+
+| Function | Returns |
+|----------|---------|
+| `find_socket()` | Auto-detect KiCad PCB editor socket path |
+| `capture_board(socket, pitch_mm)` | Full board state: pads, tracks, vias, nets, footprints, fcu/bcu grids |
+| `get_copper_grids(board, pitch_mm)` | F.Cu and B.Cu as numpy arrays (0=empty, 1=pad, 2=track, 3=via) |
+| `grid_to_png_base64(fcu, bcu, bounds)` | Generate heatmap PNG as base64 data URL |
+
+### kicad_route.py Functions
+
+| Function | Returns |
+|----------|---------|
+| `push_tracks(socket, tracks, origin_x, origin_y)` | Push track segments to KiCad |
+| `push_vias(socket, vias, origin_x, origin_y)` | Push vias to KiCad |
+| `push_routes(socket, tracks, vias, origin_x, origin_y)` | Push both in single commit |
+| `delete_tracks(socket, net_name=None)` | Delete tracks from KiCad (all or by net) |
+
+### Workflow
+
+```
+KiCad ──capture_kicad──► Server ──route/analyze──► Server ──push_kicad──► KiCad
+                              │                         │
+                              └── RouterGrid built ◄────┘
+                                  for A* routing
+```
+
+Re-capture after push to sync state. Delete tracks from KiCad if needed before re-routing.

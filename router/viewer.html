@@ -51,7 +51,7 @@ canvas {
     <div class="sep"></div>
     <button onclick="togglePadLabels()">Labels</button>
     <button onclick="toggleRatsnest()">Ratsnest</button>
-    <button onclick="resetView()">Reset</button>
+    <button id="btnHeatmap" class="active" onclick="toggleHeatmap()">Pads</button>
     <span id="info"></span>
 </div>
 
@@ -67,6 +67,7 @@ var COMPS = __COMPS__;
 var RECTS = __RECTS__;
 var HIGHLIGHT = __HIGHLIGHT__;
 var MARKERS = __MARKERS__;
+var HEATMAP = __HEATMAP__;
 var VERSION = __VERSION__;
 
 var cv = document.getElementById('cv');
@@ -79,8 +80,17 @@ var panX = 20, panY = 20;  // offset in pixels
 var showFCu = true, showBCu = true;
 var showLabels = true;
 var showRatsnest = true;
+var showHeatmap = true;
 var hoverNet = null;
 var hoverPad = null;
+
+// Heatmap image (preloaded)
+var heatmapImg = null;
+if (HEATMAP) {
+    heatmapImg = new Image();
+    heatmapImg.onload = function() { draw(); };
+    heatmapImg.src = HEATMAP;
+}
 
 // Colors
 var COL_BOARD = '#0a2e12';
@@ -149,6 +159,11 @@ function draw() {
         }
     }
 
+    // Copper heatmap overlay
+    if (showHeatmap && heatmapImg && heatmapImg.complete) {
+        drawHeatmap();
+    }
+
     // Layout tree rectangles
     drawRects();
 
@@ -161,8 +176,11 @@ function draw() {
     for (var i = 0; i < VIAS.length; i++) {
         var v = VIAS[i];
         var p = boardToScreen(v.x, v.y);
-        var r = (v.od || 0.6) / 2 * zoom;
-        var ir = (v.id || 0.3) / 2 * zoom;
+        // Use defaults if sizes are missing or invalid (od should be > id)
+        var od = (v.od && v.od > 0.4) ? v.od : 0.6;
+        var id = (v.id && v.id > 0) ? v.id : 0.3;
+        var r = od / 2 * zoom;
+        var ir = id / 2 * zoom;
         var col = (hoverNet && v.net === hoverNet) ? COL_HIGHLIGHT : COL_VIA;
         ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, Math.PI*2);
         ctx.fillStyle = col; ctx.fill();
@@ -318,36 +336,29 @@ function toggleLayer(id) {
 
 function togglePadLabels() { showLabels = !showLabels; draw(); }
 function toggleRatsnest() { showRatsnest = !showRatsnest; draw(); }
+function toggleHeatmap() {
+    showHeatmap = !showHeatmap;
+    document.getElementById('btnHeatmap').classList.toggle('active');
+    draw();
+}
 
-// Right-click pan, left-click drag components (topology-based, grid-quantized)
-var GRID_CELL = 1.0; // mm per grid cell — matches tree_to_xy SCALE
+function drawHeatmap() {
+    if (!heatmapImg || !heatmapImg.complete) return;
+    var tl = boardToScreen(0, 0);
+    var br = boardToScreen(BOARD.width, BOARD.height);
+    var w = br[0] - tl[0];
+    var h = br[1] - tl[1];
+    ctx.drawImage(heatmapImg, tl[0], tl[1], w, h);
+}
+
+// Right-click pan (view-only mode - editing done in KiCad)
 var panning = false, panStartX, panStartY;
-var movingComp = null, moveStartBoardX = 0, moveStartBoardY = 0;
-var accumDW = 0, accumDH = 0;
 
 cv.addEventListener('contextmenu', function(e) { e.preventDefault(); });
 
 cv.addEventListener('mousedown', function(e) {
     if (e.button === 2) {
         panning = true; panStartX = e.clientX; panStartY = e.clientY;
-    } else if (e.button === 0) {
-        var bp = screenToBoard(e.clientX, e.clientY);
-        var bestD = 3.0;
-        var bestRef = null;
-        for (var ref in COMPS) {
-            var c = COMPS[ref];
-            var dx = c.x - bp[0], dy = c.y - bp[1];
-            var d = Math.sqrt(dx*dx + dy*dy);
-            if (d < bestD) { bestD = d; bestRef = ref; }
-        }
-        if (bestRef) {
-            movingComp = bestRef;
-            moveStartBoardX = bp[0];
-            moveStartBoardY = bp[1];
-            accumDW = 0;
-            accumDH = 0;
-            cv.style.cursor = 'grabbing';
-        }
     }
 });
 
@@ -357,29 +368,6 @@ cv.addEventListener('mousemove', function(e) {
         panY += e.clientY - panStartY;
         panStartX = e.clientX; panStartY = e.clientY;
         draw();
-    } else if (movingComp) {
-        var bp = screenToBoard(e.clientX, e.clientY);
-        var rawDX = bp[0] - moveStartBoardX;
-        var rawDY = bp[1] - moveStartBoardY;
-        // Quantize to grid cells
-        var newDW = Math.round(rawDX / GRID_CELL);
-        var newDH = Math.round(rawDY / GRID_CELL);
-        // Only update visuals when we cross a grid cell boundary
-        if (newDW !== accumDW || newDH !== accumDH) {
-            var stepDX = (newDW - accumDW) * GRID_CELL;
-            var stepDY = (newDH - accumDH) * GRID_CELL;
-            COMPS[movingComp].x += stepDX;
-            COMPS[movingComp].y += stepDY;
-            for (var i = 0; i < PADS.length; i++) {
-                if (PADS[i].ref === movingComp) {
-                    PADS[i].x += stepDX;
-                    PADS[i].y += stepDY;
-                }
-            }
-            accumDW = newDW;
-            accumDH = newDH;
-            draw();
-        }
     } else {
         // Hover detection + cursor coordinates
         var bp = screenToBoard(e.clientX, e.clientY);
@@ -404,42 +392,13 @@ cv.addEventListener('mousemove', function(e) {
         } else {
             info.textContent = coordStr;
         }
-        var overComp = false;
-        for (var ref in COMPS) {
-            var c = COMPS[ref];
-            var cdx = c.x - bp[0], cdy = c.y - bp[1];
-            if (Math.sqrt(cdx*cdx + cdy*cdy) < 3.0) { overComp = true; break; }
-        }
-        cv.style.cursor = overComp ? 'grab' : 'crosshair';
     }
 });
 
 cv.addEventListener('mouseup', function(e) {
     if (panning) { panning = false; }
-    if (movingComp) {
-        if (accumDW !== 0 || accumDH !== 0) {
-            fetch('/api', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({action: 'move', ref: movingComp, dw: accumDW, dh: accumDH})
-            });
-        }
-        cv.style.cursor = 'crosshair';
-        movingComp = null;
-    }
 });
-cv.addEventListener('mouseleave', function() { panning = false; movingComp = null; });
-
-// Rotate grabbed component with R key
-document.addEventListener('keydown', function(e) {
-    if (movingComp && (e.key === 'r' || e.key === 'R')) {
-        fetch('/api', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({action: 'rotate', ref: movingComp})
-        });
-    }
-});
+cv.addEventListener('mouseleave', function() { panning = false; });
 
 // Zoom
 cv.addEventListener('wheel', function(e) {
