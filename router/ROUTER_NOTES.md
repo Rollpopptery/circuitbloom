@@ -66,6 +66,8 @@ Interactive viewer (view-only mode — editing done in KiCad):
 | `/get_transitions` | Layer transition points, flags missing vias |
 | `/nearest_track?net=X&x=N&y=N` | Closest point on any trace of net to (x,y) — for T-junctions |
 | `/footprints` | All footprint mappings `{package: {kicad_mod, pads}, ...}` |
+| `/find_via_spot?net=X&x=N&y=N&margin=3` | BFS from pad to find nearest reachable via spot (clear path guaranteed) |
+| `/drc` | Run KiCad DRC on the board file (requires `--board` flag) |
 | `/save` | Save tracks/vias/placement to bloom file |
 | `/reload` | Reload bloom file and rebuild grid |
 | `/capture_kicad` | Capture board state from running KiCad (pads, tracks, vias, copper heatmap) |
@@ -150,6 +152,27 @@ Absolute placement — sets col/row directly.
 ```
 Rotate 90 degrees clockwise. Swaps w/h in placement, updates component rotation.
 
+#### Track Segments
+
+```json
+{"action": "add_track", "net": "GND", "x1": 5.0, "y1": 14.0,
+ "x2": 5.0, "y2": 22.0, "layer": "B.Cu", "width": 0.25}
+```
+Add a single track segment manually.
+
+```json
+{"action": "delete_tracks", "net": "GND",
+ "x_min": 2, "y_min": 12, "x_max": 12, "y_max": 24}
+```
+Delete segments where both endpoints fall within the bounding box.
+Net filter is optional — omit to match all nets.
+
+```json
+{"action": "delete_via", "net": "GND",
+ "x_min": 2, "y_min": 12, "x_max": 12, "y_max": 24}
+```
+Delete vias within the bounding box. Net filter is optional.
+
 #### Via
 
 ```json
@@ -202,6 +225,24 @@ from `/tmp/kicad/api-*.sock` if not specified.
 ```
 Push all tracks and vias from server state to KiCad. Coordinates are converted back
 to absolute KiCad coordinates using the origin saved during capture.
+
+#### DRC (Design Rule Check)
+
+Requires the server to be started with `--board path/to/board.kicad_pcb`.
+Uses `kicad-cli pcb drc` on the host.
+
+```json
+{"action": "drc"}
+{"action": "drc", "severity": "error"}
+{"action": "drc", "all_track_errors": true, "refill_zones": true}
+{"action": "drc", "schematic_parity": true}
+```
+- `severity`: `"all"` (default), `"error"`, `"warning"`, or `"exclusions"`
+- `all_track_errors`: report all errors per track
+- `schematic_parity`: include schematic parity check
+- `refill_zones`: refill zones before running DRC
+
+Also available as `GET /drc` for a quick default check.
 
 #### Other
 
@@ -272,6 +313,10 @@ KiCad creates multiple sockets in `/tmp/kicad/`:
 
 The `/capture_kicad` endpoint auto-detects the numbered socket.
 
+Some KiCad versions only create `api.sock` even for the PCB editor. If no numbered
+socket exists but the PCB editor is listening at `api.sock`, pass it explicitly:
+`/capture_kicad?socket=ipc:///tmp/kicad/api.sock`
+
 ### Copper Heatmap
 
 The capture rasterizes actual copper shapes onto 0.1mm pitch grids:
@@ -314,3 +359,17 @@ KiCad ──capture_kicad──► Server ──route/analyze──► Server �
 ```
 
 Re-capture after push to sync state. Delete tracks from KiCad if needed before re-routing.
+
+### Saving the Board
+
+Save the board via kipy after confirmed route changes:
+
+```python
+from kipy import KiCad
+kicad = KiCad(socket_path="ipc:///tmp/kicad/api.sock")
+board = kicad.get_board()
+board.save()
+```
+
+KiCad IPC edits are in-memory until saved. Save after each successful
+routing section is confirmed visually.

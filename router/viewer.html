@@ -434,7 +434,7 @@ setInterval(async function() {
         var d = await r.json();
         if (d.v > VERSION) {
             sessionStorage.setItem('viewState', JSON.stringify({zoom: zoom, panX: panX, panY: panY}));
-            location.reload();
+            location.replace(location.pathname + '?v=' + d.v);
         }
     } catch(e) {}
 }, 500);

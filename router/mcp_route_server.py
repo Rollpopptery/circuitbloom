@@ -170,6 +170,90 @@ TOOLS = [
         }
     },
     {
+        "name": "find_via_spot",
+        "description": (
+            "BFS from a pad to find the nearest reachable spot where a via fits. "
+            "Flood-fills on the pad's layer through empty/same-net cells, then checks "
+            "via footprint clear on both layers. Guarantees the path from pad to via is clear."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "net":    {"type": "string", "description": "Net name"},
+                "x":      {"type": "number", "description": "Pad X in mm"},
+                "y":      {"type": "number", "description": "Pad Y in mm"},
+                "margin":     {"type": "integer", "description": "Clearance cells for via check (default 3)", "default": 3},
+                "min_radius": {"type": "integer", "description": "Min distance in grid cells from pad (default 10 = 1mm)", "default": 10},
+                "max_radius": {"type": "integer", "description": "Max search distance in grid cells (default 50 = 5mm)", "default": 50}
+            },
+            "required": ["net", "x", "y"]
+        }
+    },
+    {
+        "name": "add_track",
+        "description": "Add a single track segment manually. Use for precise control over individual segments.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "net":   {"type": "string", "description": "Net name"},
+                "x1":    {"type": "number", "description": "Start X in mm"},
+                "y1":    {"type": "number", "description": "Start Y in mm"},
+                "x2":    {"type": "number", "description": "End X in mm"},
+                "y2":    {"type": "number", "description": "End Y in mm"},
+                "layer": {"type": "string", "description": "F.Cu or B.Cu", "default": "F.Cu"},
+                "width": {"type": "number", "description": "Track width in mm", "default": 0.25}
+            },
+            "required": ["net", "x1", "y1", "x2", "y2"]
+        }
+    },
+    {
+        "name": "delete_tracks",
+        "description": "Delete track segments where both endpoints fall within a bounding box. Net filter is optional.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "net":   {"type": "string", "description": "Net name (optional, omit to match all)"},
+                "x_min": {"type": "number", "description": "Bounding box min X"},
+                "y_min": {"type": "number", "description": "Bounding box min Y"},
+                "x_max": {"type": "number", "description": "Bounding box max X"},
+                "y_max": {"type": "number", "description": "Bounding box max Y"}
+            },
+            "required": ["x_min", "y_min", "x_max", "y_max"]
+        }
+    },
+    {
+        "name": "delete_via",
+        "description": "Delete vias within a bounding box. Net filter is optional.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "net":   {"type": "string", "description": "Net name (optional, omit to match all)"},
+                "x_min": {"type": "number", "description": "Bounding box min X"},
+                "y_min": {"type": "number", "description": "Bounding box min Y"},
+                "x_max": {"type": "number", "description": "Bounding box max X"},
+                "y_max": {"type": "number", "description": "Bounding box max Y"}
+            },
+            "required": ["x_min", "y_min", "x_max", "y_max"]
+        }
+    },
+    {
+        "name": "drc",
+        "description": (
+            "Run KiCad Design Rule Check on the board file. "
+            "Board path is auto-detected from capture_kicad. "
+            "Returns violations with positions and severity."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "severity":         {"type": "string", "description": "all, error, warning, or exclusions", "default": "all"},
+                "all_track_errors": {"type": "boolean", "description": "Report all errors per track", "default": False},
+                "schematic_parity": {"type": "boolean", "description": "Include schematic parity check", "default": False},
+                "refill_zones":     {"type": "boolean", "description": "Refill zones before DRC", "default": False}
+            }
+        }
+    },
+    {
         "name": "place_via",
         "description": "Place a via at a specific point. Check get_orphan_vias afterwards.",
         "inputSchema": {
@@ -285,6 +369,16 @@ TOOLS = [
         }
     },
     {
+        "name": "save_kicad",
+        "description": "Save the KiCad board file to disk. Call after confirmed route changes — IPC edits are in-memory until saved.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "socket": {"type": "string", "description": "IPC socket path (auto-detects if omitted)"}
+            }
+        }
+    },
+    {
         "name": "push_kicad",
         "description": "Push all tracks and vias from server state to KiCad.",
         "inputSchema": {
@@ -337,6 +431,51 @@ def call_tool(name: str, args: dict) -> Any:
         })
     if name == "unroute":
         return http_post({"action": "unroute", "net": args["net"]})
+    if name == "find_via_spot":
+        url = f"/find_via_spot?net={args['net']}&x={args['x']}&y={args['y']}"
+        if 'margin' in args: url += f"&margin={args['margin']}"
+        if 'min_radius' in args: url += f"&min_radius={args['min_radius']}"
+        if 'max_radius' in args: url += f"&max_radius={args['max_radius']}"
+        return http_get(url)
+    if name == "add_track":
+        return http_post({
+            "action": "add_track",
+            "net":    args["net"],
+            "x1":     args["x1"],
+            "y1":     args["y1"],
+            "x2":     args["x2"],
+            "y2":     args["y2"],
+            "layer":  args.get("layer", "F.Cu"),
+            "width":  args.get("width", 0.25),
+        })
+    if name == "delete_tracks":
+        body = {
+            "action": "delete_tracks",
+            "x_min":  args["x_min"],
+            "y_min":  args["y_min"],
+            "x_max":  args["x_max"],
+            "y_max":  args["y_max"],
+        }
+        if "net" in args:
+            body["net"] = args["net"]
+        return http_post(body)
+    if name == "delete_via":
+        body = {
+            "action": "delete_via",
+            "x_min":  args["x_min"],
+            "y_min":  args["y_min"],
+            "x_max":  args["x_max"],
+            "y_max":  args["y_max"],
+        }
+        if "net" in args:
+            body["net"] = args["net"]
+        return http_post(body)
+    if name == "drc":
+        body = {"action": "drc"}
+        for k in ("severity", "all_track_errors", "schematic_parity", "refill_zones"):
+            if k in args:
+                body[k] = args[k]
+        return http_post(body)
     if name == "place_via":
         return http_post({
             "action": "place_via",
@@ -385,6 +524,16 @@ def call_tool(name: str, args: dict) -> Any:
         if "socket" in args:
             body["socket"] = args["socket"]
         return http_post(body)
+    if name == "save_kicad":
+        try:
+            from kipy import KiCad
+            socket = args.get("socket", "ipc:///tmp/kicad/api.sock")
+            kicad_inst = KiCad(socket_path=socket)
+            board = kicad_inst.get_board()
+            board.save()
+            return {"ok": True, "message": "Board saved"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
     if name == "push_kicad":
         body = {"action": "push_kicad"}
         if "socket" in args:

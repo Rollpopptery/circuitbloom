@@ -469,7 +469,8 @@ def capture_board(socket_path, pitch_mm=0.1):
         "rules": get_design_rules(board),
         "fcu": fcu,
         "bcu": bcu,
-        "bounds": bounds_dict
+        "bounds": bounds_dict,
+        "board_filename": os.path.join(board.get_project().path, board.name),
     }
 
 

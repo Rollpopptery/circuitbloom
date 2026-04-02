@@ -8,7 +8,7 @@ from dpcb_router import route_by_name, route_tap_by_name, LAYER_NAMES, GRID_PITC
 from dpcb_router8 import route8_by_name
 from route_convert import path_to_segments, path_vias
 import route_state as rs
-from route_state import state, lock, reload_bloom, reload_from_kicad, save_bloom, push_to_kicad, snap_to_pad, get_transitions, get_orphan_vias, get_clearance, get_density, get_nearest_track, handle_move, handle_place, handle_rotate, handle_place_via, handle_highlight, handle_mark, handle_clear_marks, handle_set_footprint, get_footprints, capture_design_state, compute_design_impact
+from route_state import state, lock, reload_bloom, reload_from_kicad, save_bloom, push_to_kicad, snap_to_pad, get_transitions, get_orphan_vias, get_clearance, get_density, get_nearest_track, handle_move, handle_place, handle_rotate, handle_place_via, handle_add_track, handle_delete_tracks, handle_delete_via, handle_highlight, handle_mark, handle_clear_marks, handle_set_footprint, get_footprints, capture_design_state, compute_design_impact, run_drc, find_via_spot
 
 _VIEWER_HTML = None
 
@@ -179,6 +179,19 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
                 self._json_response({"error": f"unknown ref: {ref}"}, 404)
         elif self.path == '/footprints':
             self._json_response(get_footprints())
+        elif self.path == '/drc':
+            ok, result = run_drc()
+            self._json_response({"ok": ok, **result})
+        elif self.path.startswith('/find_via_spot?'):
+            import urllib.parse
+            params = urllib.parse.parse_qs(self.path.split('?', 1)[1])
+            net = params.get('net', [''])[0]
+            x = float(params.get('x', [0])[0])
+            y = float(params.get('y', [0])[0])
+            margin = int(params.get('margin', [3])[0])
+            min_r = int(params.get('min_radius', [10])[0])
+            max_r = int(params.get('max_radius', [50])[0])
+            self._json_response(find_via_spot(net, x, y, margin, min_r, max_r))
         else:
             self._json_response(state)
 
@@ -211,6 +224,15 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
         elif action == "place_via":
             handle_place_via(cmd)
             self._json_response({"ok": True})
+        elif action == "add_track":
+            result = handle_add_track(cmd)
+            self._json_response(result)
+        elif action == "delete_tracks":
+            result = handle_delete_tracks(cmd)
+            self._json_response(result)
+        elif action == "delete_via":
+            result = handle_delete_via(cmd)
+            self._json_response(result)
         elif action == "highlight":
             handle_highlight(cmd)
             self._json_response({"ok": True})
@@ -237,6 +259,9 @@ class AgentHandler(http.server.BaseHTTPRequestHandler):
             socket_path = cmd.get("socket", None)
             ok, msg = push_to_kicad(socket_path)
             self._json_response({"ok": ok, "message": msg})
+        elif action == "drc":
+            ok, result = run_drc(cmd)
+            self._json_response({"ok": ok, **result})
         else:
             self._json_response({"ok": False, "error": f"unknown action: {action}"}, 400)
 

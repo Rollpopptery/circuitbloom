@@ -3,7 +3,9 @@
 import json
 import math
 import os
+import subprocess
 import sys
+import tempfile
 import threading
 from collections import defaultdict
 
@@ -34,6 +36,7 @@ state = {
 
 bloom_data = None
 bloom_path = None
+board_path = None  # Path to .kicad_pcb file for CLI commands (DRC etc.)
 grid = None
 lock = threading.Lock()
 
@@ -266,7 +269,7 @@ def reload_from_kicad(socket_path=None):
     Returns:
         (ok, message) tuple
     """
-    global grid, kicad_socket
+    global grid, kicad_socket, board_path
 
     try:
         from grab_layer import capture_board, find_socket, grid_to_png_base64
@@ -372,6 +375,12 @@ def reload_from_kicad(socket_path=None):
     n_tracks = len(data["tracks"])
     n_vias = len(data["vias"])
     n_nets = len(data["nets"])
+
+    # Auto-set board_path from KiCad if not already configured
+    board_file = data.get("board_filename")
+    if board_file and not board_path:
+        board_path = board_file
+        print(f"  Board file: {board_path}")
 
     print(f"  KiCad capture: {n_pads} pads, {n_tracks} tracks, {n_vias} vias, {n_nets} nets")
     return True, f"captured {n_pads} pads, {n_tracks} tracks, {n_vias} vias, {n_nets} nets"
@@ -825,6 +834,123 @@ def handle_place_via(cmd):
         state["version"] += 1
 
 
+def find_via_spot(net, x_mm, y_mm, margin=3, min_radius=10, max_radius=50):
+    """Wrapper — delegates to find_via module, passing the current grid."""
+    from find_via import find_via_spot as _find
+    return _find(grid, net, x_mm, y_mm, margin, min_radius, max_radius)
+
+
+def handle_add_track(cmd):
+    """Add a single track segment.
+
+    cmd: {action: "add_track", net: "GND", x1: 5.0, y1: 14.0, x2: 5.0, y2: 22.0,
+          layer: "B.Cu", width: 0.25}
+    """
+    from dpcb_router import GRID_PITCH
+    net = cmd.get("net", "")
+    seg = {
+        "x1": cmd.get("x1", 0), "y1": cmd.get("y1", 0),
+        "x2": cmd.get("x2", 0), "y2": cmd.get("y2", 0),
+        "width": cmd.get("width", 0.25),
+        "layer": cmd.get("layer", "F.Cu"),
+        "net": net
+    }
+
+    with lock:
+        state["tracks"].append(seg)
+        if grid:
+            nid = grid.get_net_id(net)
+            layer_id = 0 if seg["layer"] == "F.Cu" else 1
+            w = max(1, int(round(seg["width"] / GRID_PITCH)))
+            grid.mark_track(seg["x1"], seg["y1"], seg["x2"], seg["y2"],
+                            w, layer_id, nid)
+        state["version"] += 1
+
+    return {"ok": True, "track": seg}
+
+
+def handle_delete_tracks(cmd):
+    """Delete track segments within a region.
+
+    cmd: {action: "delete_tracks", net: "GND",
+          x_min: 2, y_min: 12, x_max: 12, y_max: 24}
+
+    Deletes segments where BOTH endpoints fall within the bounding box.
+    If net is provided, only deletes segments on that net.
+    """
+    from dpcb_router import GRID_PITCH, _line_cells
+    net = cmd.get("net", "")
+    x_min = cmd.get("x_min", -1e9)
+    y_min = cmd.get("y_min", -1e9)
+    x_max = cmd.get("x_max", 1e9)
+    y_max = cmd.get("y_max", 1e9)
+
+    def in_box(x, y):
+        return x_min <= x <= x_max and y_min <= y <= y_max
+
+    with lock:
+        kept = []
+        removed = 0
+        for t in state["tracks"]:
+            if (not net or t["net"] == net) and \
+               in_box(t["x1"], t["y1"]) and in_box(t["x2"], t["y2"]):
+                # Clear from grid
+                if grid:
+                    nid = grid.get_net_id(t["net"])
+                    layer_id = 0 if t["layer"] == "F.Cu" else 1
+                    w = max(1, int(round(t.get("width", 0.25) / GRID_PITCH)))
+                    gx1, gy1 = grid.mm_to_grid(t["x1"], t["y1"])
+                    gx2, gy2 = grid.mm_to_grid(t["x2"], t["y2"])
+                    hw = w // 2
+                    for cx, cy in _line_cells(gx1, gy1, gx2, gy2):
+                        for dy in range(-hw, hw + 1):
+                            for dx in range(-hw, hw + 1):
+                                grid.clear_cell(layer_id, cx + dx, cy + dy, nid)
+                removed += 1
+            else:
+                kept.append(t)
+        state["tracks"] = kept
+        if removed:
+            state["version"] += 1
+
+    return {"ok": True, "removed": removed}
+
+
+def handle_delete_via(cmd):
+    """Delete vias within a region.
+
+    cmd: {action: "delete_via", net: "GND",
+          x_min: 2, y_min: 12, x_max: 12, y_max: 24}
+
+    If net is provided, only deletes vias on that net.
+    """
+    net = cmd.get("net", "")
+    x_min = cmd.get("x_min", -1e9)
+    y_min = cmd.get("y_min", -1e9)
+    x_max = cmd.get("x_max", 1e9)
+    y_max = cmd.get("y_max", 1e9)
+
+    with lock:
+        kept = []
+        removed = 0
+        for v in state["vias"]:
+            if (not net or v["net"] == net) and \
+               x_min <= v["x"] <= x_max and y_min <= v["y"] <= y_max:
+                if grid:
+                    gx, gy = grid.mm_to_grid(v["x"], v["y"])
+                    r = grid.via_od // 2
+                    for layer in (0, 1):
+                        grid.mark_circle(layer, gx, gy, r, 0)
+                removed += 1
+            else:
+                kept.append(v)
+        state["vias"] = kept
+        if removed:
+            state["version"] += 1
+
+    return {"ok": True, "removed": removed}
+
+
 def handle_set_footprint(cmd):
     """Set or modify the kicad_mod path for a package.
 
@@ -1083,3 +1209,88 @@ def _rebuild_from_placement():
     state["pads"] = pads
     state["rects"] = rects
     state["version"] += 1
+
+
+# ============================================================
+# DRC — KiCad CLI Design Rule Check
+# ============================================================
+
+def run_drc(cmd=None):
+    """Run kicad-cli pcb drc on the board file.
+
+    cmd options:
+        schematic_parity (bool): include schematic parity check
+        all_track_errors (bool): report all errors per track
+        refill_zones (bool): refill zones before DRC
+        severity (str): "all", "error", "warning", or "exclusions"
+
+    Returns (ok, result_dict).
+    """
+    if not board_path:
+        return False, {"error": "no board file configured (use --board flag)"}
+
+    if not os.path.isfile(board_path):
+        return False, {"error": f"board file not found: {board_path}"}
+
+    cmd = cmd or {}
+
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+        out_path = tmp.name
+
+    try:
+        args = ["kicad-cli", "pcb", "drc",
+                "--format", "json",
+                "--units", "mm",
+                "-o", out_path]
+
+        severity = cmd.get("severity", "all")
+        if severity == "all":
+            args.append("--severity-all")
+        elif severity == "error":
+            args.append("--severity-error")
+        elif severity == "warning":
+            args.append("--severity-warning")
+        elif severity == "exclusions":
+            args.append("--severity-exclusions")
+
+        if cmd.get("all_track_errors"):
+            args.append("--all-track-errors")
+        if cmd.get("schematic_parity"):
+            args.append("--schematic-parity")
+        if cmd.get("refill_zones"):
+            args.append("--refill-zones")
+
+        args.append("--exit-code-violations")
+        args.append(board_path)
+
+        result = subprocess.run(args, capture_output=True, text=True, timeout=120)
+
+        if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+            with open(out_path) as f:
+                drc_report = json.load(f)
+        else:
+            return False, {
+                "error": "DRC produced no output",
+                "stderr": result.stderr,
+                "returncode": result.returncode
+            }
+
+        violations = drc_report.get("violations", [])
+        has_violations = result.returncode != 0
+
+        return True, {
+            "violations": len(violations),
+            "has_errors": has_violations,
+            "report": drc_report,
+            "returncode": result.returncode
+        }
+
+    except FileNotFoundError:
+        return False, {"error": "kicad-cli not found — is KiCad installed and on PATH?"}
+    except subprocess.TimeoutExpired:
+        return False, {"error": "DRC timed out (120s)"}
+    except Exception as e:
+        return False, {"error": str(e)}
+    finally:
+        if os.path.exists(out_path):
+            os.unlink(out_path)

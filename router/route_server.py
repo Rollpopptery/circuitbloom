@@ -26,11 +26,14 @@ def run():
     parser = argparse.ArgumentParser(description="Route Server — PCB route viewer")
     parser.add_argument("bloom", nargs="?", default=None,
                         help="Path to .bloom file (optional, starts empty if omitted)")
+    parser.add_argument("--board", default=None,
+                        help="Path to .kicad_pcb file for CLI commands (DRC)")
     parser.add_argument("--browser-port", type=int, default=8083)
     parser.add_argument("--agent-port", type=int, default=8084)
     args = parser.parse_args()
 
     rs.bloom_path = args.bloom
+    rs.board_path = args.board
     if rs.bloom_path:
         rs.reload_bloom()
     else:
