@@ -78,7 +78,7 @@ TOOLS = [
     },
     {
         "name": "get_clearance",
-        "description": "Per-net minimum clearance to nearest foreign obstacle, sorted worst-first. Use to audit trace quality.",
+        "description": "Design-rule clearance audit. For every placed track, walks its footprint and measures the true edge-to-edge distance from the track to the nearest foreign copper cell. Reports one violation per (foreign net, near pad) pair, keyed by the worst (smallest) approach. `distance_mm = 0` means the track physically overlaps that foreign pad (a short). Any distance strictly less than the board design rule is reported as a violation; nets with no violations appear in `clean`. Use after routing to audit trace quality — and trust distance_mm: if it says 0, the track is touching copper it should not touch.",
         "inputSchema": {"type": "object", "properties": {}}
     },
     {
@@ -88,7 +88,7 @@ TOOLS = [
     },
     {
         "name": "get_transitions",
-        "description": "Layer transition points. Flags missing vias at layer changes.",
+        "description": "Endpoint audit for every track segment. Reports (1) layer transitions and whether each has a via, and (2) dangling endpoints — segment endpoints that do not touch a pad of the same net on the endpoint's layer, a via of the same net, or another endpoint of the same net on the same layer. Catches the failure mode where a trace is placed on a layer its endpoint pad does not exist on (e.g. B.Cu trace between two SMD-on-F.Cu pads with no vias): every other check can pass and the net is still electrically floating.",
         "inputSchema": {"type": "object", "properties": {}}
     },
     {
@@ -117,9 +117,22 @@ TOOLS = [
     {
         "name": "route",
         "description": (
-            "Route a trace between two points for a net. "
-            "Endpoints snap to nearest pad on the net. "
-            "Default margin=3 (0.3mm clearance), reduce to 2 for tight areas. "
+            "SUGGESTION TOOL — A* auto-router between two points for a net. "
+            "Useful for route suggestions; can sometimes make good paths between "
+            "points in open regions with no nearby foreign nets. NOT the primary "
+            "way to place traces — hand-placement with add_track is generally "
+            "preferred because auto-router output is often low-quality at tight "
+            "pitches and tends to produce tangled corners. A valid auto-routed "
+            "result should be kept as-is: do not replace it with hand segments "
+            "to 'tidy' corners, because those corners exist because of "
+            "constraints that are not visible in a rendered view. "
+            "Endpoints snap to the nearest pad on the net. "
+            "`margin` is the edge-to-edge clearance between the placed "
+            "track and any foreign copper, in 0.1mm grid cells: margin=2 "
+            "means the track edge stays 0.2mm from every foreign pad/trace. "
+            "Default margin=3 (0.3mm). Use margin=2 for a board with a "
+            "0.2mm design rule; going below the design rule will produce "
+            "violations in get_clearance. "
             "Use use8=true for 45-degree traces after fan-out stubs. "
             "Use layer=auto to allow vias and layer changes. "
             "Response includes clearance delta for all nets."
@@ -141,8 +154,11 @@ TOOLS = [
     {
         "name": "route_tap",
         "description": (
-            "Route from a pad to the nearest existing trace on its net. "
-            "Use for T-junctions and power taps. "
+            "SUGGESTION TOOL — A* auto-router from a pad to the nearest existing "
+            "trace on its net. Same caveats as `route`: useful for suggestions, "
+            "but hand-placement of the tap segment is preferred when the geometry "
+            "is clear. Best used for T-junctions into an established GND or power "
+            "trunk where the path is obvious. "
             "Response includes clearance delta for all nets."
         ),
         "inputSchema": {
@@ -190,8 +206,67 @@ TOOLS = [
         }
     },
     {
+        "name": "get_pad_info",
+        "description": (
+            "Look up detailed info for a specific pad/pin. Returns net, position, "
+            "SMD flag, plus component value, footprint, and description. "
+            "Use before routing to understand what you're connecting."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string", "description": "Component reference designator (e.g. U1, R3, C5)"},
+                "pin": {"type": "string", "description": "Pin number or name (e.g. 1, 43, A)"}
+            },
+            "required": ["ref", "pin"]
+        }
+    },
+    {
+        "name": "get_component_info",
+        "description": (
+            "Look up detailed info for a component. Returns value, footprint, "
+            "description, datasheet, position, rotation, mounting style, and full pin list."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string", "description": "Component reference designator (e.g. U1, R3, C5)"}
+            },
+            "required": ["ref"]
+        }
+    },
+    {
+        "name": "route_examples",
+        "description": (
+            "Search the route examples database for similar routes from other boards. "
+            "Uses semantic search over a ChromaDB collection of real PCB routes. "
+            "Returns matching routes with descriptions, component info, lengths, layers, and via counts. "
+            "Use to find how other boards route similar signals (e.g. 'USB differential pair', "
+            "'crystal oscillator load capacitor', 'SPI clock to flash chip')."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "q":     {"type": "string", "description": "Search query — natural language description of the route"},
+                "n":     {"type": "integer", "description": "Number of results (default 5, max 20)", "default": 5},
+                "board": {"type": "string", "description": "Filter to a specific board name (optional)"}
+            },
+            "required": ["q"]
+        }
+    },
+    {
         "name": "add_track",
-        "description": "Add a single track segment manually. Use for precise control over individual segments.",
+        "description": (
+            "PREFERRED ROUTING TOOL — Place a single track segment at exact mm "
+            "coordinates. The primary way to route traces: build each net from "
+            "hand-chosen segments based on pad geometry, corridors, keep-outs, "
+            "and patterns from route_examples matches. A segment is refused "
+            "with a clearance_violation error if it would collide with a "
+            "foreign pad, via, or trace — the check walks the cells the track "
+            "would cover against the rasterised router grid (real pad polygons "
+            "plus design-rule dilation). If refused, the segment is wrong — "
+            "adjust the sketch rather than working around the check."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -349,13 +424,26 @@ TOOLS = [
     },
     {
         "name": "highlight",
-        "description": "Highlight a net in the viewer. Pass empty string to clear.",
+        "description": "Highlight a net in the viewer via SSE (instant, no reload). Pass empty string to clear.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "net": {"type": "string", "description": "Net name, or empty string to clear"}
+                "net": {"type": "string", "description": "Net name, or empty string to clear"},
+                "color": {"type": "string", "description": "Highlight color (default #ffff00)"}
             },
             "required": ["net"]
+        }
+    },
+    {
+        "name": "open_board",
+        "description": "Open a .kicad_pcb file in the running KiCad editor and capture it into the route server. Path must be on the host filesystem.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Full path to .kicad_pcb file on the host filesystem"},
+                "socket": {"type": "string", "description": "IPC socket path (auto-detects if omitted)"}
+            },
+            "required": ["path"]
         }
     },
     {
@@ -386,6 +474,18 @@ TOOLS = [
             "properties": {
                 "socket": {"type": "string", "description": "IPC socket path (auto-detects if omitted)"}
             }
+        }
+    },
+    {
+        "name": "clear_kicad_net",
+        "description": "Delete all tracks and vias for a single net in KiCad via IPC. Does NOT touch server state — pair with `unroute` to keep both sides in sync.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "net": {"type": "string", "description": "Net name to clear (required)"},
+                "socket": {"type": "string", "description": "IPC socket path (auto-detects if omitted)"}
+            },
+            "required": ["net"]
         }
     },
 ]
@@ -436,6 +536,20 @@ def call_tool(name: str, args: dict) -> Any:
         if 'margin' in args: url += f"&margin={args['margin']}"
         if 'min_radius' in args: url += f"&min_radius={args['min_radius']}"
         if 'max_radius' in args: url += f"&max_radius={args['max_radius']}"
+        return http_get(url)
+    if name == "get_pad_info":
+        import urllib.parse
+        url = f"/pad_info?ref={urllib.parse.quote(args['ref'])}&pin={urllib.parse.quote(args['pin'])}"
+        return http_get(url)
+    if name == "get_component_info":
+        import urllib.parse
+        url = f"/component_info?ref={urllib.parse.quote(args['ref'])}"
+        return http_get(url)
+    if name == "route_examples":
+        import urllib.parse
+        url = f"/route_examples?q={urllib.parse.quote(args['q'])}"
+        if 'n' in args: url += f"&n={args['n']}"
+        if 'board' in args: url += f"&board={urllib.parse.quote(args['board'])}"
         return http_get(url)
     if name == "add_track":
         return http_post({
@@ -518,7 +632,15 @@ def call_tool(name: str, args: dict) -> Any:
     if name == "clear_marks":
         return http_post({"action": "clear_marks"})
     if name == "highlight":
-        return http_post({"action": "highlight", "net": args["net"]})
+        body = {"action": "highlight", "net": args["net"]}
+        if "color" in args:
+            body["color"] = args["color"]
+        return http_post(body)
+    if name == "open_board":
+        body = {"action": "open_board", "path": args["path"]}
+        if "socket" in args:
+            body["socket"] = args["socket"]
+        return http_post(body)
     if name == "capture_kicad":
         body = {"action": "capture_kicad"}
         if "socket" in args:
@@ -536,6 +658,11 @@ def call_tool(name: str, args: dict) -> Any:
             return {"ok": False, "error": str(e)}
     if name == "push_kicad":
         body = {"action": "push_kicad"}
+        if "socket" in args:
+            body["socket"] = args["socket"]
+        return http_post(body)
+    if name == "clear_kicad_net":
+        body = {"action": "clear_kicad_net", "net": args["net"]}
         if "socket" in args:
             body["socket"] = args["socket"]
         return http_post(body)

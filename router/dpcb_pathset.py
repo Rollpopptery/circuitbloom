@@ -354,13 +354,13 @@ def _mark_path_on_grid(path, net_id, grid, track_width_cells):
     for i in range(1, len(path)):
         if path[i][2] != path[i - 1][2]:
             vx, vy = path[i][0], path[i][1]
-            for layer in (0, 1):
+            for layer in range(grid.num_layers):
                 grid.mark_circle(layer, vx, vy, grid.via_od // 2, net_id)
 
 
 def _clear_net_from_grid(net_id, grid):
-    """Clear ALL cells for a net from both layers using numpy."""
-    for layer in (0, 1):
+    """Clear ALL cells for a net from all layers using numpy."""
+    for layer in range(grid.num_layers):
         grid.occupy[layer][grid.occupy[layer] == net_id] = 0
 
 
@@ -370,7 +370,7 @@ def _get_net_cells(net_id, grid):
     Returns list of (gx, gy, layer) — unordered.
     """
     cells = []
-    for layer in (0, 1):
+    for layer in range(grid.num_layers):
         ys, xs = np.where(grid.occupy[layer] == net_id)
         for x, y in zip(xs, ys):
             cells.append((int(x), int(y), layer))
@@ -559,7 +559,7 @@ def _raw_path_to_output(path, net_name, grid, track_width_mm, output,
             ex_mm, ey_mm = grid.grid_to_mm(ex, ey)
             output.tracks.append(TrackSegment(
                 sx_mm, sy_mm, ex_mm, ey_mm,
-                LAYER_NAMES[layer], net_name, track_width_mm
+                grid.layer_names.get(layer, f'L{layer}'), net_name, track_width_mm
             ))
 
     # Snap first and last track endpoints to exact pad coordinates

@@ -171,13 +171,13 @@ def build_grid(bloom):
                         grid.pad_keepout.add((gx + dx, gy + dy))
 
             # Mark pad on grid layers
-            layers = [0, 1] if not smd else [0]
+            layers = list(range(grid.num_layers)) if not smd else [0]
             for layer in layers:
                 grid.mark_pad(px, py, pad_r, layer, nid)
 
     # Mark existing tracks
     for trk in bloom.get("pcb", {}).get("tracks", []):
-        layer = LAYER_IDS.get(trk["layer"], 0)
+        layer = grid.layer_ids.get(trk["layer"], 0)
         nid = grid.net_ids.get(trk["net"], 0)
         w = max(1, int(round(trk.get("width", track_w) / GRID_PITCH)))
         grid.mark_track(trk["x1"], trk["y1"], trk["x2"], trk["y2"],

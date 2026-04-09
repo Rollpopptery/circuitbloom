@@ -12,9 +12,16 @@ from kipy import KiCad
 from kipy.board_types import Track, Via
 from kipy.geometry import Vector2
 
-# Layer constants
+# Layer constants (KiCad layer IDs)
 BL_F_CU = 3
 BL_B_CU = 34
+
+# Layer name to KiCad layer ID mapping
+# Inner layers: In1.Cu=4, In2.Cu=5, ...
+LAYER_NAME_TO_KICAD = {
+    "F.Cu": 3, "In1.Cu": 4, "In2.Cu": 5, "In3.Cu": 6,
+    "In4.Cu": 7, "In5.Cu": 8, "In6.Cu": 9, "B.Cu": 34,
+}
 
 
 def get_net_map(board):
@@ -64,7 +71,7 @@ def push_tracks(socket_path, tracks, origin_x, origin_y):
         track.end = end
 
         track.width = int(t.get("width", 0.25) * 1000000)
-        track.layer = BL_F_CU if t.get("layer") == "F.Cu" else BL_B_CU
+        track.layer = LAYER_NAME_TO_KICAD.get(t.get("layer", "F.Cu"), BL_F_CU)
         track.net = net_map[net_name]
 
         new_tracks.append(track)
@@ -164,6 +171,53 @@ def delete_tracks(socket_path, net_name=None):
     return True, f"Deleted {len(tracks_to_remove)} tracks"
 
 
+def clear_net(socket_path, net_name):
+    """Delete all tracks and vias for a single net from the KiCad board.
+
+    Args:
+        socket_path: KiCad IPC socket path
+        net_name: Net to clear (required)
+
+    Returns:
+        (ok, message, counts) tuple where counts = {"tracks": n, "vias": n}
+    """
+    kicad = KiCad(socket_path=socket_path)
+    board = kicad.get_board()
+
+    items_to_remove = []
+    track_count = 0
+    via_count = 0
+
+    for track in board.get_tracks():
+        if track.net and track.net.name == net_name:
+            items_to_remove.append(track)
+            track_count += 1
+
+    for via in board.get_vias():
+        if via.net and via.net.name == net_name:
+            items_to_remove.append(via)
+            via_count += 1
+
+    if not items_to_remove:
+        return True, f"nothing to remove on net {net_name}", {"tracks": 0, "vias": 0}
+
+    commit = board.begin_commit()
+    board.remove_items(items_to_remove)
+    board.push_commit(commit, f"Clear net {net_name}: {track_count} tracks, {via_count} vias")
+
+    return True, f"Cleared net {net_name}: {track_count} tracks, {via_count} vias", {
+        "tracks": track_count,
+        "vias": via_count,
+    }
+
+def clear_all_routes(board):
+    """Delete all tracks and vias from the board."""
+    items_to_remove = list(board.get_tracks()) + list(board.get_vias())
+    if items_to_remove:
+        commit = board.begin_commit()
+        board.remove_items(items_to_remove)
+        board.push_commit(commit, f"Clear all routes before push")
+
 def push_routes(socket_path, tracks, vias, origin_x, origin_y):
     """Push both tracks and vias to KiCad in a single commit.
 
@@ -176,8 +230,11 @@ def push_routes(socket_path, tracks, vias, origin_x, origin_y):
     Returns:
         (ok, message) tuple
     """
+
     kicad = KiCad(socket_path=socket_path)
     board = kicad.get_board()
+    clear_all_routes(board)
+    
     net_map = get_net_map(board)
 
     items = []
@@ -205,7 +262,7 @@ def push_routes(socket_path, tracks, vias, origin_x, origin_y):
         track.end = end
 
         track.width = int(t.get("width", 0.25) * 1000000)
-        track.layer = BL_F_CU if t.get("layer") == "F.Cu" else BL_B_CU
+        track.layer = LAYER_NAME_TO_KICAD.get(t.get("layer", "F.Cu"), BL_F_CU)
         track.net = net_map[net_name]
 
         items.append(track)

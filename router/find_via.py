@@ -43,7 +43,7 @@ def find_via_spot(grid, net, x_mm, y_mm, margin=3, min_radius=10, max_radius=50)
         if (cx, cy) in grid.pad_keepout:
             return False
         check_r = via_r + margin
-        for layer in (0, 1):
+        for layer in range(grid.num_layers):
             for dy in range(-check_r, check_r + 1):
                 for dx in range(-check_r, check_r + 1):
                     if dx * dx + dy * dy > check_r * check_r:
@@ -75,7 +75,7 @@ def find_via_spot(grid, net, x_mm, y_mm, margin=3, min_radius=10, max_radius=50)
                 "x": vx_mm,
                 "y": vy_mm,
                 "distance_mm": round(dist * GRID_PITCH, 2),
-                "layer": "F.Cu" if start_layer == 0 else "B.Cu"
+                "layer": grid.layer_names.get(start_layer, f"L{start_layer}")
             }
 
         # Expand to 4-connected neighbors on the start layer

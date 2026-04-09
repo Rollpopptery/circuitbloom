@@ -35,18 +35,19 @@ def route8(grid, x1_mm, y1_mm, x2_mm, y2_mm, net_id,
     if not grid.in_bounds(gx2, gy2):
         return RouteResult(False, message="End out of bounds")
 
-    if layer_mode == 'F.Cu':
-        allowed = {0}
-    elif layer_mode == 'B.Cu':
-        allowed = {1}
+    if layer_mode == 'auto':
+        allowed = set(range(grid.num_layers))
+    elif layer_mode in grid.layer_ids:
+        allowed = {grid.layer_ids[layer_mode]}
     else:
-        allowed = {0, 1}
+        allowed = set(range(grid.num_layers))
 
     start_layers = {start_layer} if start_layer is not None else allowed
     end_layers = {end_layer} if end_layer is not None else allowed
 
     margin = margin_override if margin_override is not None else 1
-    blocked = grid.build_blocked_grid(net_id, margin)
+    blocked = grid.build_blocked_grid(net_id, margin,
+                                      track_half_width=track_width_cells // 2)
 
     W, H = grid.width, grid.height
 
@@ -120,26 +121,29 @@ def route8(grid, x1_mm, y1_mm, x2_mm, y2_mm, net_id,
                 counter += 1
                 came_from[nk] = ck
 
-        # Via
+        # Via (through-hole: connects all layers)
         if len(allowed) > 1:
-            ol = 1 - cl
             is_goal = (cx == gx2 and cy == gy2)
             goal_via_ok = is_goal and end_layer is None
-            via_allowed = not blocked[ol][cy, cx] and (cx, cy) not in grid.pad_keepout
-            if goal_via_ok or via_allowed:
-                ng = cg + via_cost
-                vk = (cx, cy, ol)
-                old = g_score.get(vk)
-                if old is None or ng < old:
-                    g_score[vk] = ng
-                    heapq.heappush(open_set, (ng + _octile_h(cx, cy, gx2, gy2), counter, cx, cy, ol))
-                    counter += 1
-                    came_from[vk] = ck
+            pad_keepout_ok = (cx, cy) not in grid.pad_keepout
+            for ol in allowed:
+                if ol == cl:
+                    continue
+                via_ok = not blocked[ol][cy, cx] and pad_keepout_ok
+                if goal_via_ok or via_ok:
+                    ng = cg + via_cost
+                    vk = (cx, cy, ol)
+                    old = g_score.get(vk)
+                    if old is None or ng < old:
+                        g_score[vk] = ng
+                        heapq.heappush(open_set, (ng + _octile_h(cx, cy, gx2, gy2), counter, cx, cy, ol))
+                        counter += 1
+                        came_from[vk] = ck
 
     if goal_key is None:
         bx, by, bl = best_cell
         bx_mm, by_mm = grid.grid_to_mm(bx, by)
-        bl_name = LAYER_NAMES.get(bl, str(bl))
+        bl_name = grid.layer_names.get(bl, str(bl))
         return RouteResult(False, message=f"No path found ({iterations} iters) — closest: {bl_name} ({bx_mm},{by_mm})")
 
     # Reconstruct
@@ -212,12 +216,12 @@ def _flood_same_net_8(grid, net_id, gx, gy, layers):
                 if key not in visited:
                     visited.add(key)
                     queue.append(key)
-        ol = 1 - cl
-        if ol in layers and grid.occupy[ol][cy, cx] == net_id:
-            key = (cx, cy, ol)
-            if key not in visited:
-                visited.add(key)
-                queue.append(key)
+        for ol in layers:
+            if ol != cl and grid.occupy[ol][cy, cx] == net_id:
+                key = (cx, cy, ol)
+                if key not in visited:
+                    visited.add(key)
+                    queue.append(key)
     return visited
 
 

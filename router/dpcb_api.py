@@ -808,7 +808,7 @@ class ApiServer:
         import numpy as np
 
         if sub == 'reload':
-            for layer in (0, 1):
+            for layer in range(grid.num_layers):
                 grid.occupy[layer][grid.occupy[layer] == KEEPOUT_NET_ID] = 0
             self.keepouts_data = None
             n = self._load_keepouts_file(grid)
@@ -817,7 +817,7 @@ class ApiServer:
 
         elif sub == 'clear':
             count = 0
-            for layer in (0, 1):
+            for layer in range(grid.num_layers):
                 mask = grid.occupy[layer] == KEEPOUT_NET_ID
                 count += int(np.count_nonzero(mask))
                 grid.occupy[layer][mask] = 0
@@ -831,7 +831,7 @@ class ApiServer:
 
         elif sub == 'status':
             counts = []
-            for layer in (0, 1):
+            for layer in range(grid.num_layers):
                 c = int(np.count_nonzero(grid.occupy[layer] == KEEPOUT_NET_ID))
                 counts.append(c)
             path = self._keepouts_path()
@@ -1079,7 +1079,7 @@ class ApiServer:
         """Extract turning points from a path and format as mm coordinates."""
         if len(path) < 2:
             x, y = grid.grid_to_mm(path[0][0], path[0][1])
-            layer = 'F.Cu' if path[0][2] == 0 else 'B.Cu'
+            layer = grid.layer_names.get(path[0][2], f'L{path[0][2]}')
             return f"({x:.1f},{y:.1f}){layer}"
 
         layers = ['F.Cu', 'B.Cu']

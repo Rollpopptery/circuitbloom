@@ -2,7 +2,7 @@
 """
 dpcb_router.py — Grid-based A* PCB router for .dpcb boards.
 
-Operates on a 0.1mm pitch integer grid. Two layers (F.Cu=0, B.Cu=1).
+Operates on a 0.1mm pitch integer grid. Supports N copper layers (default 2).
 
 Key optimisation: obstacles are pre-dilated by (track_half_width + clearance)
 so A* only checks single cells, not track width at every step.
@@ -16,12 +16,38 @@ import numpy as np
 from dataclasses import dataclass, field
 
 
-GRID_PITCH = 0.1  # mm per grid cell
+from dpcb_router_grid import RouterGrid, GRID_PITCH, _line_cells
+
+
+
 
 LAYER_FCU = 0
 LAYER_BCU = 1
+# Default 2-layer mappings (overridden by RouterGrid instance for N-layer boards)
 LAYER_NAMES = {0: 'F.Cu', 1: 'B.Cu'}
 LAYER_IDS = {'F.Cu': 0, 'B.Cu': 1}
+
+
+def make_layer_maps(num_layers, custom_names=None):
+    """Build layer_names and layer_ids dicts for N layers.
+
+    Default naming: F.Cu=0, In1.Cu=1, In2.Cu=2, ..., B.Cu=last.
+    custom_names: optional dict {index: name} to override defaults.
+    """
+    names = {}
+    if num_layers == 1:
+        names[0] = 'F.Cu'
+    elif num_layers == 2:
+        names = {0: 'F.Cu', 1: 'B.Cu'}
+    else:
+        names[0] = 'F.Cu'
+        for i in range(1, num_layers - 1):
+            names[i] = f'In{i}.Cu'
+        names[num_layers - 1] = 'B.Cu'
+    if custom_names:
+        names.update(custom_names)
+    ids = {v: k for k, v in names.items()}
+    return names, ids
 
 
 @dataclass
@@ -34,192 +60,6 @@ class RouteResult:
     message: str = ""
     tap_point: tuple = None  # (x_mm, y_mm) where route tapped into existing trace
 
-class RouterGrid:
-    """
-    2-layer occupancy grid using numpy int32 arrays.
-    occupy[layer][y, x]: 0=empty, >0=net_id, -1=obstacle
-    """
-
-    def __init__(self, width_mm, height_mm, clearance_cells, via_od_cells, via_id_cells):
-        self.width = int(round(width_mm / GRID_PITCH))
-        self.height = int(round(height_mm / GRID_PITCH))
-        self.width_mm = width_mm
-        self.height_mm = height_mm
-        self.clearance = clearance_cells
-        self.via_od = via_od_cells
-        self.via_id = via_id_cells
-
-        self.occupy = [
-            np.zeros((self.height, self.width), dtype=np.int32),
-            np.zeros((self.height, self.width), dtype=np.int32)
-        ]
-        self.net_ids = {}
-        self.pad_layers = {}  # (gx, gy) -> layer (0=F.Cu, 1=B.Cu, None=both)
-        self.pad_keepout = set()  # (gx, gy) positions where vias are blocked
-
-    def in_bounds(self, x, y):
-        return 0 <= x < self.width and 0 <= y < self.height
-
-    def mm_to_grid(self, mm_x, mm_y):
-        return int(round(mm_x / GRID_PITCH)), int(round(mm_y / GRID_PITCH))
-
-    def grid_to_mm(self, gx, gy):
-        return round(gx * GRID_PITCH, 4), round(gy * GRID_PITCH, 4)
-
-    def set_cell(self, layer, x, y, net_id):
-        if 0 <= x < self.width and 0 <= y < self.height:
-            self.occupy[layer][y, x] = net_id
-
-    def clear_cell(self, layer, x, y, net_id):
-        if 0 <= x < self.width and 0 <= y < self.height:
-            if self.occupy[layer][y, x] == net_id:
-                self.occupy[layer][y, x] = 0
-
-    def build_blocked_grid(self, net_id, margin, keepout_margin=1):
-        """
-        Build boolean blocked grids for A*.
-        Real obstacles get full clearance dilation.
-        Keepout cells (net_id == -1) get minimal dilation.
-        """
-        blocked = [None, None]
-        for layer in (0, 1):
-            occ = self.occupy[layer]
-            # Real obstacles: foreign cells that aren't keepouts
-            real = (occ != 0) & (occ != net_id) & (occ != -1)
-            # Keepout cells
-            keepout = (occ == -1)
-
-            # Dilate real obstacles with full margin
-            if margin > 0:
-                dilated = np.copy(real)
-                for dx in range(1, margin + 1):
-                    dilated[:, dx:] |= real[:, :-dx]
-                    dilated[:, :-dx] |= real[:, dx:]
-                h_dilated = np.copy(dilated)
-                for dy in range(1, margin + 1):
-                    dilated[dy:, :] |= h_dilated[:-dy, :]
-                    dilated[:-dy, :] |= h_dilated[dy:, :]
-            else:
-                dilated = np.copy(real)
-
-            # Dilate keepouts with minimal margin
-            if keepout_margin > 0:
-                ko_dilated = np.copy(keepout)
-                for dx in range(1, keepout_margin + 1):
-                    ko_dilated[:, dx:] |= keepout[:, :-dx]
-                    ko_dilated[:, :-dx] |= keepout[:, dx:]
-                ko_h = np.copy(ko_dilated)
-                for dy in range(1, keepout_margin + 1):
-                    ko_dilated[dy:, :] |= ko_h[:-dy, :]
-                    ko_dilated[:-dy, :] |= ko_h[dy:, :]
-                dilated |= ko_dilated
-            else:
-                dilated |= keepout
-
-            # Unmask same-net cells — dilation from foreign nets must not
-            # block cells that belong to the routing net itself.
-            # Without this, a foreign trace near a same-net pad dilates
-            # into the pad area, preventing the router from reaching its
-            # own pad.
-            same_net = (occ == net_id)
-            dilated &= ~same_net
-
-            blocked[layer] = dilated
-        return blocked
-
-    def mark_line(self, layer, x1, y1, x2, y2, net_id, half_width=0):
-        cells = _line_cells(x1, y1, x2, y2)
-        for cx, cy in cells:
-            for dy in range(-half_width, half_width + 1):
-                for dx in range(-half_width, half_width + 1):
-                    nx, ny = cx + dx, cy + dy
-                    if 0 <= nx < self.width and 0 <= ny < self.height:
-                        self.occupy[layer][ny, nx] = net_id
-
-    def mark_circle(self, layer, cx, cy, radius, net_id):
-        for dy in range(-radius, radius + 1):
-            for dx in range(-radius, radius + 1):
-                if dx * dx + dy * dy <= radius * radius:
-                    nx, ny = cx + dx, cy + dy
-                    if 0 <= nx < self.width and 0 <= ny < self.height:
-                        self.occupy[layer][ny, nx] = net_id
-
-    def mark_track(self, x1_mm, y1_mm, x2_mm, y2_mm, width_cells, layer, net_id):
-        gx1, gy1 = self.mm_to_grid(x1_mm, y1_mm)
-        gx2, gy2 = self.mm_to_grid(x2_mm, y2_mm)
-        self.mark_line(layer, gx1, gy1, gx2, gy2, net_id, width_cells // 2)
-
-    def mark_via(self, x_mm, y_mm, net_id):
-        gx, gy = self.mm_to_grid(x_mm, y_mm)
-        for layer in (0, 1):
-            self.mark_circle(layer, gx, gy, self.via_od // 2, net_id)
-
-    def mark_pad(self, x_mm, y_mm, radius_cells, layer, net_id):
-        gx, gy = self.mm_to_grid(x_mm, y_mm)
-        self.mark_circle(layer, gx, gy, radius_cells, net_id)
-
-    def populate_from_board(self, board):
-        self.net_ids = {}
-        for i, net in enumerate(board.nets):
-            self.net_ids[net.name] = i + 1
-
-        pad_net = {}
-        for net in board.nets:
-            nid = self.net_ids[net.name]
-            for ref, pin in net.pads:
-                pad_net[(ref, pin)] = nid
-
-        for trk in board.tracks:
-            layer = LAYER_IDS.get(trk.layer, 0)
-            nid = self.net_ids.get(trk.net, 0)
-            w = max(1, int(round(trk.width / GRID_PITCH)))
-            self.mark_track(trk.x1, trk.y1, trk.x2, trk.y2, w, layer, nid)
-
-        for via in board.vias:
-            nid = self.net_ids.get(via.net, 0)
-            self.mark_via(via.x, via.y, nid)
-
-        track_w = max(1, int(round(board.rules.track / GRID_PITCH)))
-        # Pad radius: 4 cells (~0.4mm). Must be small enough that
-        # pad_r + margin < min_pad_pitch (TSSOP = 6.5 cells).
-        pad_r = 4
-        for fp in board.footprints:
-            for pad in fp.abs_pads:
-                is_th = getattr(pad, 'pad_type', 'th') == 'th'
-                pad_layer = None if is_th else 0  # None = both layers (through-hole), 0 = F.Cu only (SMD)
-                # Both pad.num and net.pads pin are int
-                nid = pad_net.get((fp.ref, pad.num), 0)
-                # Pads not in any net (nid=0) should block as obstacles (-1)
-                if nid == 0:
-                    nid = -1
-                # Store pad layer for route endpoint constraints
-                gx, gy = self.mm_to_grid(pad.x, pad.y)
-                self.pad_layers[(gx, gy)] = pad_layer
-                # Add pad keepout zone for vias (block vias near ALL pads)
-                via_keepout_r = pad_r + 2  # block vias from landing directly on pads
-                for dy in range(-via_keepout_r, via_keepout_r + 1):
-                    for dx in range(-via_keepout_r, via_keepout_r + 1):
-                        if dx * dx + dy * dy <= via_keepout_r * via_keepout_r:
-                            self.pad_keepout.add((gx + dx, gy + dy))
-                # Mark pad on appropriate layers
-                layers_to_mark = [0, 1] if is_th else [0]
-                for layer in layers_to_mark:
-                    self.mark_pad(pad.x, pad.y, pad_r, layer, nid)
-
-    def get_net_id(self, net_name):
-        return self.net_ids.get(net_name, 0)
-
-    def stats(self):
-        total = self.width * self.height
-        occ = [int(np.count_nonzero(self.occupy[l])) for l in (0, 1)]
-        return {
-            'grid_size': f"{self.width}x{self.height}",
-            'total_cells': total * 2,
-            'occupied_fcu': occ[0],
-            'occupied_bcu': occ[1],
-            'pct_fcu': f"{occ[0]/total*100:.1f}%",
-            'pct_bcu': f"{occ[1]/total*100:.1f}%",
-        }
 
 
 # ============ A* ============
@@ -244,12 +84,12 @@ def _flood_same_net(grid, net_id, gx, gy, layers):
                 if key not in visited:
                     visited.add(key)
                     queue.append(key)
-        ol = 1 - cl
-        if ol in layers and grid.occupy[ol][cy, cx] == net_id:
-            key = (cx, cy, ol)
-            if key not in visited:
-                visited.add(key)
-                queue.append(key)
+        for ol in layers:
+            if ol != cl and grid.occupy[ol][cy, cx] == net_id:
+                key = (cx, cy, ol)
+                if key not in visited:
+                    visited.add(key)
+                    queue.append(key)
     return visited
 
 
@@ -264,19 +104,20 @@ def route(grid, x1_mm, y1_mm, x2_mm, y2_mm, net_id,
     if not grid.in_bounds(gx2, gy2):
         return RouteResult(False, message=f"End out of bounds")
 
-    if layer_mode == 'F.Cu':
-        allowed = {0}
-    elif layer_mode == 'B.Cu':
-        allowed = {1}
+    if layer_mode == 'auto':
+        allowed = set(range(grid.num_layers))
+    elif layer_mode in grid.layer_ids:
+        allowed = {grid.layer_ids[layer_mode]}
     else:
-        allowed = {0, 1}
+        allowed = set(range(grid.num_layers))
 
     # Constrain start/end layers if specified (for SMD pads)
     start_layers = {start_layer} if start_layer is not None else allowed
     end_layers = {end_layer} if end_layer is not None else allowed
 
     margin = margin_override if margin_override is not None else 1
-    blocked = grid.build_blocked_grid(net_id, margin)
+    blocked = grid.build_blocked_grid(net_id, margin,
+                                      track_half_width=track_width_cells // 2)
 
     W, H = grid.width, grid.height
 
@@ -341,27 +182,29 @@ def route(grid, x1_mm, y1_mm, x2_mm, y2_mm, net_id,
                 counter += 1
                 came_from[nk] = ck
 
-        # Via - blocked near pads regardless of net
+        # Via (through-hole: connects all layers)
         if len(allowed) > 1:
-            ol = 1 - cl
             is_goal = (cx == gx2 and cy == gy2)
-            # Only allow via at goal for through-hole pads (end_layer=None)
             goal_via_ok = is_goal and end_layer is None
-            via_allowed = not blocked[ol][cy, cx] and (cx, cy) not in grid.pad_keepout
-            if goal_via_ok or via_allowed:
-                ng = cg + via_cost
-                vk = (cx, cy, ol)
-                old = g_score.get(vk)
-                if old is None or ng < old:
-                    g_score[vk] = ng
-                    heapq.heappush(open_set, (ng + h(cx, cy), counter, cx, cy, ol))
-                    counter += 1
-                    came_from[vk] = ck
+            pad_keepout_ok = (cx, cy) not in grid.pad_keepout
+            for ol in allowed:
+                if ol == cl:
+                    continue
+                via_ok = not blocked[ol][cy, cx] and pad_keepout_ok
+                if goal_via_ok or via_ok:
+                    ng = cg + via_cost
+                    vk = (cx, cy, ol)
+                    old = g_score.get(vk)
+                    if old is None or ng < old:
+                        g_score[vk] = ng
+                        heapq.heappush(open_set, (ng + h(cx, cy), counter, cx, cy, ol))
+                        counter += 1
+                        came_from[vk] = ck
 
     if goal_key is None:
         bx, by, bl = best_cell
         bx_mm, by_mm = grid.grid_to_mm(bx, by)
-        bl_name = LAYER_NAMES.get(bl, str(bl))
+        bl_name = grid.layer_names.get(bl, str(bl))
         return RouteResult(False, message=f"No path found ({iterations} iters) — closest: {bl_name} ({bx_mm},{by_mm})")
 
     # Reconstruct
@@ -426,17 +269,18 @@ def route_tap(grid, x1_mm, y1_mm, net_id,
     if not grid.in_bounds(gx1, gy1):
         return RouteResult(False, message="Start out of bounds")
 
-    if layer_mode == 'F.Cu':
-        allowed = {0}
-    elif layer_mode == 'B.Cu':
-        allowed = {1}
+    if layer_mode == 'auto':
+        allowed = set(range(grid.num_layers))
+    elif layer_mode in grid.layer_ids:
+        allowed = {grid.layer_ids[layer_mode]}
     else:
-        allowed = {0, 1}
+        allowed = set(range(grid.num_layers))
 
     start_layers = {start_layer} if start_layer is not None else allowed
 
     margin = margin_override if margin_override is not None else 1
-    blocked = grid.build_blocked_grid(net_id, margin)
+    blocked = grid.build_blocked_grid(net_id, margin,
+                                      track_half_width=track_width_cells // 2)
 
     W, H = grid.width, grid.height
 
@@ -445,7 +289,7 @@ def route_tap(grid, x1_mm, y1_mm, net_id,
 
     # Check there are same-net cells NOT in the start flood (i.e. existing traces to tap into)
     has_target = False
-    for layer in range(2):
+    for layer in range(grid.num_layers):
         if layer not in allowed:
             continue
         if np.any((grid.occupy[layer] == net_id) & ~np.isin(
@@ -516,24 +360,26 @@ def route_tap(grid, x1_mm, y1_mm, net_id,
                 counter += 1
                 came_from[nk] = ck
 
-        # Via
+        # Via (through-hole: connects all layers)
         if len(allowed) > 1:
-            ol = 1 - cl
-            via_allowed = not blocked[ol][cy, cx] and (cx, cy) not in grid.pad_keepout
-            if via_allowed:
-                ng = cg + via_cost
-                vk = (cx, cy, ol)
-                old = g_score.get(vk)
-                if old is None or ng < old:
-                    g_score[vk] = ng
-                    heapq.heappush(open_set, (ng, counter, cx, cy, ol))
-                    counter += 1
-                    came_from[vk] = ck
+            pad_keepout_ok = (cx, cy) not in grid.pad_keepout
+            for ol in allowed:
+                if ol == cl:
+                    continue
+                if not blocked[ol][cy, cx] and pad_keepout_ok:
+                    ng = cg + via_cost
+                    vk = (cx, cy, ol)
+                    old = g_score.get(vk)
+                    if old is None or ng < old:
+                        g_score[vk] = ng
+                        heapq.heappush(open_set, (ng, counter, cx, cy, ol))
+                        counter += 1
+                        came_from[vk] = ck
 
     if goal_key is None:
         bx, by, bl = best_cell
         bx_mm, by_mm = grid.grid_to_mm(bx, by)
-        bl_name = LAYER_NAMES.get(bl, str(bl))
+        bl_name = grid.layer_names.get(bl, str(bl))
         return RouteResult(False, message=f"No path to net ({iterations} iters) — closest: {bl_name} ({bx_mm},{by_mm})")
 
     # Reconstruct
@@ -604,23 +450,6 @@ def route_by_name(grid, net_name, x1_mm, y1_mm, x2_mm, y2_mm,
                  start_layer=start_layer, end_layer=end_layer,
                  margin_override=margin_override)
 
-
-def _line_cells(x1, y1, x2, y2):
-    cells = []
-    dx, dy = abs(x2-x1), abs(y2-y1)
-    sx = 1 if x1 < x2 else -1
-    sy = 1 if y1 < y2 else -1
-    err = dx - dy
-    while True:
-        cells.append((x1, y1))
-        if x1 == x2 and y1 == y2:
-            break
-        e2 = 2 * err
-        if e2 > -dy:
-            err -= dy; x1 += sx
-        if e2 < dx:
-            err += dx; y1 += sy
-    return cells
 
 
 # ============ SELF-TEST ============

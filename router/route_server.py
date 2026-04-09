@@ -39,8 +39,16 @@ def run():
     else:
         print("  No bloom file specified — starting empty.")
 
-    browser = http.server.HTTPServer(('0.0.0.0', args.browser_port), BrowserHandler)
-    agent = http.server.HTTPServer(('0.0.0.0', args.agent_port), AgentHandler)
+    class ThreadedHTTPServer(http.server.HTTPServer):
+        """Handle each request in a separate thread (needed for SSE)."""
+        from socketserver import ThreadingMixIn
+        daemon_threads = True
+        def process_request(self, request, client_address):
+            t = threading.Thread(target=self.finish_request, args=(request, client_address), daemon=True)
+            t.start()
+
+    browser = ThreadedHTTPServer(('0.0.0.0', args.browser_port), BrowserHandler)
+    agent = ThreadedHTTPServer(('0.0.0.0', args.agent_port), AgentHandler)
 
     threading.Thread(target=browser.serve_forever, daemon=True).start()
     threading.Thread(target=agent.serve_forever, daemon=True).start()
