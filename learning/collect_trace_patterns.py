@@ -15,6 +15,8 @@ import sys
 import glob
 import urllib.request
 import argparse
+from pcb_check import is_two_layer
+
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "router"))
 
@@ -79,6 +81,12 @@ def main():
         abspath = os.path.abspath(filepath)
 
         print(f"[{i+1}/{len(files)}] {name}")
+
+       
+        if not is_two_layer(abspath):
+            print(f"  [skip] not a 2-layer board")
+            skipped += 1
+            continue
 
         # Skip if board already exists in collection (append mode only)
         if args.append and existing_collection is not None:

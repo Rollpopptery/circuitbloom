@@ -30,7 +30,7 @@ from PIL import Image, ImageDraw
 # ============================================================
 
 IMAGE_SIZE = 224
-PAD_RADIUS = 3  # pixels
+PAD_RADIUS = 2  # pixels
 MARGIN_RATIO = 0.25  # 25% margin around trace bounding box
 MIN_WINDOW_MM = 1.0  # minimum window size to avoid degenerate cases
 

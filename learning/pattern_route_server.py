@@ -324,6 +324,36 @@ def _place_trace(candidate, net, width=0.25):
     }
 
 
+def _get_query_image(from_pad_str, to_pad_str, net):
+    """Render the DINOv2 query image for a pad pair.
+    
+    Returns PNG bytes or None.
+    """
+    from full_pattern_render import render_full_pattern
+
+    data      = _fetch_board_state()
+    pads      = data.get("pads", [])
+    tracks    = data.get("tracks", [])
+    pad_counts = count_component_pins(pads)
+
+    src_pad = _find_pad(pads, from_pad_str)
+    dst_pad = _find_pad(pads, to_pad_str)
+    if not src_pad or not dst_pad:
+        return None
+
+    src_pad, dst_pad = choose_source_dest(src_pad, dst_pad, pad_counts)
+    source = (src_pad["x"], src_pad["y"])
+    dest   = (dst_pad["x"], dst_pad["y"])
+
+    other_tracks = [t for t in tracks if t.get("net") != net]
+    img = render_full_pattern(pads, other_tracks, net, source, dest)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+
 
 def _try_place_candidates(candidates, net, width=0.25):
     """Try placing candidates in order until one passes clearance."""
@@ -451,6 +481,26 @@ class PatternHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/nets":
             routable = _get_routable_nets()
             self._json_response({"ok": True, "nets": routable})
+
+        elif path == "/query_image":
+            from_pad = params.get("from", [None])[0]
+            to_pad   = params.get("to",   [None])[0]
+            net      = params.get("net",  [None])[0]
+
+            if not from_pad or not to_pad or not net:
+                self._json_response({"ok": False, "error": "Required: from, to, net"}, 400)
+                return
+
+            png = _get_query_image(from_pad, to_pad, net)
+            if png:
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(png)
+            else:
+                self._json_response({"ok": False, "error": "pad not found"}, 400)
+                
 
         elif path == "/place":
             from_pad = params.get("from", [None])[0]

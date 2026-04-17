@@ -18,6 +18,10 @@ Usage:
 
 import time
 
+from dpcb_router_grid import GRID_PITCH
+
+def _snap(v):
+    return round(round(v / GRID_PITCH) * GRID_PITCH, 4)
 
 def capture_from_kicad(socket_path=None, board_path_hint=None):
     """Capture board state from KiCad.
@@ -46,9 +50,13 @@ def capture_from_kicad(socket_path=None, board_path_hint=None):
         from grab_layer import capture_board, find_socket, grid_to_png_base64
         from route_convert import net_color
         from route_state import build_router_grid_from_capture
+        from dpcb_router_grid import GRID_PITCH
     except ImportError as e:
         return {"ok": False, "message": f"import error: {e}",
                 "grid": None, "socket": None, "board_path": None, "state": None}
+
+    def _snap(v):
+        return round(round(v / GRID_PITCH) * GRID_PITCH, 4)
 
     # Auto-detect socket
     if socket_path is None:
@@ -76,49 +84,49 @@ def capture_from_kicad(socket_path=None, board_path_hint=None):
     board_w = bounds["max_x"] - origin_x
     board_h = bounds["max_y"] - origin_y
 
-    # Offset pads
+    # Offset and snap pads
     pads = []
     for p in data["pads"]:
         pads.append({
-            "ref": p["ref"],
-            "pin": p["pin"],
-            "net": p["net"],
-            "x": round(p["x"] - origin_x, 3),
-            "y": round(p["y"] - origin_y, 3),
-            "smd": p["smd"],
+            "ref":  p["ref"],
+            "pin":  p["pin"],
+            "net":  p["net"],
+            "x":    _snap(p["x"] - origin_x),
+            "y":    _snap(p["y"] - origin_y),
+            "smd":  p["smd"],
             "name": p.get("name", p["pin"]),
         })
 
-    # Offset tracks
+    # Offset and snap tracks
     tracks = []
     for t in data["tracks"]:
         tracks.append({
-            "x1": round(t["x1"] - origin_x, 3),
-            "y1": round(t["y1"] - origin_y, 3),
-            "x2": round(t["x2"] - origin_x, 3),
-            "y2": round(t["y2"] - origin_y, 3),
+            "x1":    _snap(t["x1"] - origin_x),
+            "y1":    _snap(t["y1"] - origin_y),
+            "x2":    _snap(t["x2"] - origin_x),
+            "y2":    _snap(t["y2"] - origin_y),
             "width": t["width"],
             "layer": t["layer"],
-            "net": t["net"],
+            "net":   t["net"],
         })
 
-    # Offset vias
+    # Offset and snap vias
     vias = []
     for v in data["vias"]:
         vias.append({
-            "x": round(v["x"] - origin_x, 3),
-            "y": round(v["y"] - origin_y, 3),
-            "od": v["od"],
-            "id": v["id"],
+            "x":   _snap(v["x"] - origin_x),
+            "y":   _snap(v["y"] - origin_y),
+            "od":  v["od"],
+            "id":  v["id"],
             "net": v["net"],
         })
 
-    # Offset components
+    # Offset and snap components
     components = {}
     for ref, pos in data["footprints"].items():
         components[ref] = {
-            "x": round(pos["x"] - origin_x, 3),
-            "y": round(pos["y"] - origin_y, 3),
+            "x": _snap(pos["x"] - origin_x),
+            "y": _snap(pos["y"] - origin_y),
         }
 
     # Heatmap PNG
@@ -143,34 +151,34 @@ def capture_from_kicad(socket_path=None, board_path_hint=None):
         new_board_path = board_file
         print(f"  Board file: {new_board_path}")
 
-    n_pads = len(data["pads"])
+    n_pads   = len(data["pads"])
     n_tracks = len(data["tracks"])
-    n_vias = len(data["vias"])
-    n_nets = len(data["nets"])
+    n_vias   = len(data["vias"])
+    n_nets   = len(data["nets"])
     print(f"  KiCad capture: {n_pads} pads, {n_tracks} tracks, {n_vias} vias, {n_nets} nets")
 
     return {
-        "ok": True,
+        "ok":      True,
         "message": f"captured {n_pads} pads, {n_tracks} tracks, {n_vias} vias, {n_nets} nets",
-        "grid": new_grid,
-        "socket": socket_path,
+        "grid":    new_grid,
+        "socket":  socket_path,
         "board_path": new_board_path,
         "state": {
-            "pads": pads,
+            "pads":   pads,
             "tracks": tracks,
-            "vias": vias,
+            "vias":   vias,
             "board": {
-                "width": board_w,
-                "height": board_h,
-                "rules": data.get("rules", {}),
-                "origin_x": origin_x,
-                "origin_y": origin_y,
+                "width":          board_w,
+                "height":         board_h,
+                "rules":          data.get("rules", {}),
+                "origin_x":       origin_x,
+                "origin_y":       origin_y,
                 "heatmap_bounds": bounds,
-                "copper_layers": data.get("copper_layers", ["F.Cu", "B.Cu"]),
+                "copper_layers":  data.get("copper_layers", ["F.Cu", "B.Cu"]),
             },
-            "nets": nets,
+            "nets":       nets,
             "components": components,
-            "rects": [],
-            "heatmap": heatmap,
+            "rects":      [],
+            "heatmap":    heatmap,
         },
     }

@@ -59,7 +59,6 @@ def find_pad(pads, ref_pin):
             return p
     return None
 
-
 def render_board_with_candidates(pads, candidates, net, board_dims,
                                  source, dest, width=800):
     """Render board pads and candidate traces to an image.
@@ -113,7 +112,30 @@ def render_board_with_candidates(pads, candidates, net, board_dims,
         for seg in segments:
             x1, y1 = mm_to_px(seg[0], seg[1])
             x2, y2 = mm_to_px(seg[2], seg[3])
-            draw.line([x1, y1, x2, y2], fill=colour, width=trace_width)
+            layer = seg[4] if len(seg) > 4 else "F.Cu"
+            is_back = ("B." in layer) if isinstance(layer, str) else (layer == 1)
+
+            if is_back:
+                # Dashed line for B.Cu
+                dx_seg = x2 - x1
+                dy_seg = y2 - y1
+                length = math.hypot(dx_seg, dy_seg)
+                if length < 1:
+                    continue
+                dash = max(4, int(0.5 * scale))
+                gap  = max(2, int(0.25 * scale))
+                step = dash + gap
+                steps = int(length / step)
+                for s in range(steps + 1):
+                    t0 = min(s * step,        length) / length
+                    t1 = min(s * step + dash, length) / length
+                    sx0 = int(x1 + dx_seg * t0)
+                    sy0 = int(y1 + dy_seg * t0)
+                    sx1 = int(x1 + dx_seg * t1)
+                    sy1 = int(y1 + dy_seg * t1)
+                    draw.line([sx0, sy0, sx1, sy1], fill=colour, width=trace_width)
+            else:
+                draw.line([x1, y1, x2, y2], fill=colour, width=trace_width)
 
         # Draw vias
         via_r = max(2, int(0.3 * scale))

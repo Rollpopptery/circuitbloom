@@ -118,12 +118,18 @@ def transform_trace(meta, query_from, query_to, target_layers=None):
             transform: dict with rotation, scale, etc.
             source_meta: original metadata
     """
-    stored_from = (meta["from_x"], meta["from_y"])
-    stored_to = (meta["to_x"], meta["to_y"])
+    GRID = 0.1   # mm — snap all coordinates to this grid
+    STITCH_TOL = 0.15  # mm — stitch consecutive endpoints within this distance
 
-    xform = _compute_transform(stored_from, stored_to, query_from, query_to)
+    def snap(v):
+        return round(round(v / GRID) * GRID, 4)
+
+    stored_from = (meta["from_x"], meta["from_y"])
+    stored_to   = (meta["to_x"],   meta["to_y"])
+
+    xform    = _compute_transform(stored_from, stored_to, query_from, query_to)
     rotation = xform["rotation"]
-    scale = xform["scale"]
+    scale    = xform["scale"]
 
     if target_layers is None:
         target_layers = {0: "F.Cu", 1: "B.Cu"}
@@ -142,21 +148,33 @@ def transform_trace(meta, query_from, query_to, target_layers=None):
         nx1, ny1 = _transform_point(x1, y1, stored_from, rotation, scale, query_from)
         nx2, ny2 = _transform_point(x2, y2, stored_from, rotation, scale, query_from)
 
-        new_segments.append([nx1, ny1, nx2, ny2, layer])
+        new_segments.append([snap(nx1), snap(ny1), snap(nx2), snap(ny2), layer])
+
+    # Stitch consecutive segment endpoints to match exactly
+    for i in range(len(new_segments) - 1):
+        x2, y2 = new_segments[i][2], new_segments[i][3]
+        x1, y1 = new_segments[i + 1][0], new_segments[i + 1][1]
+        if 0 < math.hypot(x2 - x1, y2 - y1) < STITCH_TOL:
+            new_segments[i + 1][0] = x2
+            new_segments[i + 1][1] = y2
+
+    # Remove zero-length segments
+    new_segments = [s for s in new_segments
+                    if math.hypot(s[2] - s[0], s[3] - s[1]) > 1e-6]
 
     stored_vias = json.loads(meta.get("vias", "[]"))
     new_vias = []
     for via in stored_vias:
         vx, vy = via[0], via[1]
         nvx, nvy = _transform_point(vx, vy, stored_from, rotation, scale, query_from)
-        new_vias.append([nvx, nvy])
+        new_vias.append([snap(nvx), snap(nvy)])
 
     return {
-        "segments": new_segments,
-        "vias": new_vias,
-        "transform": xform,
+        "segments":        new_segments,
+        "vias":            new_vias,
+        "transform":       xform,
         "scale_distortion": round(abs(xform["scale"] - 1.0), 3),
-        "source_meta": meta,
+        "source_meta":     meta,
     }
 
 

@@ -28,7 +28,11 @@ import math
 import random
 from collections import defaultdict
 
-from dpcb_router_grid import GRID_PITCH, _line_cells_fast
+
+
+from dpcb_router_grid import GRID_PITCH, snap_coord, _line_cells_fast
+
+VIA_RADIUS = 0.4  # mm — typical via annular ring + clearance
 
 SNAP_TOL = 0.05  # mm
 ANGLE_TOL = 2.0  # degrees — segments within this of canonical are already snapped
@@ -45,6 +49,31 @@ def _snap(x, y):
 def _seg_angle(x1, y1, x2, y2):
     """Angle of segment in radians, range [-pi, pi]."""
     return math.atan2(y2 - y1, x2 - x1)
+
+def _find_layer_junctions(tracks):
+    """Return list of (x, y, net, [layer_id_a, layer_id_b, ...]) for every
+    endpoint where the same net has segments on more than one layer."""
+    # Map snapped point -> set of layers seen, and the net
+    point_layers: defaultdict[tuple, set] = defaultdict(set)
+    point_net: dict[tuple, str] = {}
+
+    for t in tracks:
+        net = t["net"]
+        layer = t["layer"]
+        for pt in (_snap(t["x1"], t["y1"]), _snap(t["x2"], t["y2"])):
+            point_layers[pt].add(layer)
+            point_net[pt] = net  # same net guaranteed at transitions
+
+    junctions = []
+    for pt, layers in point_layers.items():
+        if len(layers) > 1:
+            junctions.append({
+                "x":      pt[0],
+                "y":      pt[1],
+                "net":    point_net[pt],
+                "layers": list(layers),
+            })
+    return junctions
 
 
 def _nearest_canonical(angle):
@@ -63,6 +92,42 @@ def _nearest_canonical(angle):
             best_diff = diff
             best = ca
     return best, math.degrees(best_diff)
+
+
+
+def _stamp_junction_keepouts(grid, junctions):
+    """Stamp via-buffer keepout circles into grid.occupy for each junction."""
+    r_cells = max(1, int(round(VIA_RADIUS / GRID_PITCH)))
+    for j in junctions:
+        nid = grid.net_ids.get(j["net"], 0)
+        gx, gy = grid.mm_to_grid(j["x"], j["y"])
+        for layer_name in j["layers"]:
+            layer_id = grid.layer_ids.get(layer_name)
+            if layer_id is None:
+                continue
+            for dy in range(-r_cells, r_cells + 1):
+                for dx in range(-r_cells, r_cells + 1):
+                    if math.hypot(dx, dy) <= r_cells:
+                        nx, ny = gx + dx, gy + dy
+                        if 0 <= nx < grid.width and 0 <= ny < grid.height:
+                            grid.occupy[layer_id][ny, nx] = nid
+
+
+def _clear_junction_keepouts(grid, junctions):
+    """Remove via-buffer keepout circles from grid.occupy."""
+    r_cells = max(1, int(round(VIA_RADIUS / GRID_PITCH)))
+    for j in junctions:
+        gx, gy = grid.mm_to_grid(j["x"], j["y"])
+        for layer_name in j["layers"]:
+            layer_id = grid.layer_ids.get(layer_name)
+            if layer_id is None:
+                continue
+            for dy in range(-r_cells, r_cells + 1):
+                for dx in range(-r_cells, r_cells + 1):
+                    if math.hypot(dx, dy) <= r_cells:
+                        nx, ny = gx + dx, gy + dy
+                        if 0 <= nx < grid.width and 0 <= ny < grid.height:
+                            grid.occupy[layer_id][ny, nx] = 0
 
 
 def _endpoint_on_canonical(x1, y1, x2, y2, canonical_angle):
@@ -250,26 +315,12 @@ def _collect_candidates(tracks, pads,vias):
 # ============================================================
 # MAIN OPTIMISATION PASS
 # ============================================================
-
 def optimise_pass(state, grid, lock):
-    """Single random segment 8-direction snap step.
-
-    Picks one non-canonical segment at random and tries to snap it
-    to the nearest canonical PCB angle. Tests clearance on the
-    adjusted segment and its neighbour. Accepts or restores.
-
-    Args:
-        state:   route server state dict
-        grid:    RouterGrid
-        lock:    threading.Lock
-
-    Returns:
-        dict with snapped (bool), net, diff_deg, reason
-    """
+    """Single random segment 8-direction snap step."""
     with lock:
         tracks = list(state["tracks"])
-        pads = list(state["pads"])
-        vias = list(state["vias"])
+        pads   = list(state["pads"])
+        vias   = list(state["vias"])
 
     candidates = _collect_candidates(tracks, pads, vias)
 
@@ -279,89 +330,75 @@ def optimise_pass(state, grid, lock):
     random.shuffle(candidates)
 
     for c in candidates:
-        net = c["net"]
-        seg = c["seg"]
-        layer = c["layer"]
-        width = c["width"]
-        fx, fy = c["fixed_x"], c["fixed_y"]
-        mx, my = c["move_x"], c["move_y"]
-        new_mx, new_my = c["new_x"], c["new_y"]
-        neighbour = c["neighbour"]
+        net, layer, width = c["net"], c["layer"], c["width"]
+        fx,  fy           = c["fixed_x"],  c["fixed_y"]
+        mx,  my           = c["move_x"],   c["move_y"]
+        new_mx, new_my    = c["new_x"],    c["new_y"]
+        seg               = c["seg"]
+        neighbour         = c["neighbour"]
 
-        # Skip if the new position is essentially the same
         if math.hypot(new_mx - mx, new_my - my) < 1e-4:
             continue
 
-        # Clear old segment from grid
+        # Clear old segments
         _clear_segment(grid, seg["x1"], seg["y1"],
-                       seg["x2"], seg["y2"],
-                       layer, net, width)
-
-        # Clear neighbour from grid if it exists
+                       seg["x2"], seg["y2"], layer, net, width)
         if neighbour:
-            _clear_segment(grid, neighbour["x1"], neighbour["y1"],
+            _clear_segment(grid,
+                           neighbour["x1"], neighbour["y1"],
                            neighbour["x2"], neighbour["y2"],
                            neighbour["layer"], neighbour["net"],
                            float(neighbour.get("width", 0.25) or 0.25))
 
-        # Test new segment (fixed -> new_move)
-        ok_seg = _test_segment_clearance(
-            grid, fx, fy, new_mx, new_my, layer, net, width)
+        # Mark new segment positions
+        _mark_segment(grid, fx, fy, new_mx, new_my, layer, net, width)
 
-        # Test adjusted neighbour if exists
-        ok_neighbour = True
-        if neighbour and ok_seg:
-            # Find which end of the neighbour is at the moved point
+        mk = _snap(mx, my)
+        if neighbour:
             nk1 = _snap(neighbour["x1"], neighbour["y1"])
-            nk2 = _snap(neighbour["x2"], neighbour["y2"])
-            mk = _snap(mx, my)
             if nk1 == mk:
                 n_x1, n_y1 = new_mx, new_my
                 n_x2, n_y2 = neighbour["x2"], neighbour["y2"]
             else:
                 n_x1, n_y1 = neighbour["x1"], neighbour["y1"]
                 n_x2, n_y2 = new_mx, new_my
+            _mark_segment(grid, n_x1, n_y1, n_x2, n_y2,
+                          neighbour["layer"], neighbour["net"],
+                          float(neighbour.get("width", 0.25) or 0.25))
 
+        # Stamp transition-via keepouts reflecting new geometry
+        junctions = _find_layer_junctions(state["tracks"])
+        _stamp_junction_keepouts(grid, junctions)
+
+        # Test clearance
+        ok = _test_segment_clearance(
+            grid, fx, fy, new_mx, new_my, layer, net, width)
+
+        ok_neighbour = True
+        if neighbour and ok:
             ok_neighbour = _test_segment_clearance(
                 grid, n_x1, n_y1, n_x2, n_y2,
                 neighbour["layer"], neighbour["net"],
                 float(neighbour.get("width", 0.25) or 0.25))
 
-        if ok_seg and ok_neighbour:
-            # Accept — mark new segments on grid
-            _mark_segment(grid, fx, fy, new_mx, new_my, layer, net, width)
+        # Remove transition-via keepouts
+        _clear_junction_keepouts(grid, junctions)
 
-            if neighbour:
-                nk1 = _snap(neighbour["x1"], neighbour["y1"])
-                mk = _snap(mx, my)
-                if nk1 == mk:
-                    _mark_segment(grid, new_mx, new_my,
-                                  neighbour["x2"], neighbour["y2"],
-                                  neighbour["layer"], neighbour["net"],
-                                  float(neighbour.get("width", 0.25) or 0.25))
-                else:
-                    _mark_segment(grid, neighbour["x1"], neighbour["y1"],
-                                  new_mx, new_my,
-                                  neighbour["layer"], neighbour["net"],
-                                  float(neighbour.get("width", 0.25) or 0.25))
-
-            # Update state atomically
-            seg_key = _seg_key(seg)
-
-            # Build updated segment (preserve direction)
+        if ok and ok_neighbour:
+            # Build updated segments
             k1 = _snap(seg["x1"], seg["y1"])
             fk = _snap(fx, fy)
             if k1 == fk:
-                new_seg = {**seg, "x2": round(new_mx, 3), "y2": round(new_my, 3)}
+                new_seg = {**seg, "x2": snap_coord(new_mx), "y2": snap_coord(new_my)}
             else:
-                new_seg = {**seg, "x1": round(new_mx, 3), "y1": round(new_my, 3)}
+                new_seg = {**seg, "x1": snap_coord(new_mx), "y1": snap_coord(new_my)}
+
+            seg_key = _seg_key(seg)
+            nb_key  = _seg_key(neighbour) if neighbour else None
 
             with lock:
                 new_tracks = []
-                replaced_seg = False
-                replaced_nb = False
-                nb_key = _seg_key(neighbour) if neighbour else None
-
+                replaced_seg = replaced_nb = False
                 for t in state["tracks"]:
                     k = _seg_key(t)
                     if k == seg_key and not replaced_seg:
@@ -369,39 +406,39 @@ def optimise_pass(state, grid, lock):
                         replaced_seg = True
                     elif neighbour and k == nb_key and not replaced_nb:
                         nk1 = _snap(neighbour["x1"], neighbour["y1"])
-                        mk = _snap(mx, my)
                         if nk1 == mk:
                             new_tracks.append({
                                 **neighbour,
-                                "x1": round(new_mx, 3),
-                                "y1": round(new_my, 3),
+                                "x1": snap_coord(new_mx),
+                                "y1": snap_coord(new_my),
                             })
                         else:
                             new_tracks.append({
                                 **neighbour,
-                                "x2": round(new_mx, 3),
-                                "y2": round(new_my, 3),
+                                "x2": snap_coord(new_mx),
+                                "y2": snap_coord(new_my),
                             })
                         replaced_nb = True
                     else:
                         new_tracks.append(t)
-
                 state["tracks"] = new_tracks
                 state["version"] += 1
 
-            return {
-                "snapped": True,
-                "net": net,
-                "diff_deg": round(c["diff_deg"], 1),
-            }
+            return {"snapped": True, "net": net,
+                    "diff_deg": round(c["diff_deg"], 1)}
 
         else:
             # Restore
-            _mark_segment(grid, seg["x1"], seg["y1"],
-                          seg["x2"], seg["y2"],
-                          layer, net, width)
+            _clear_segment(grid, fx, fy, new_mx, new_my, layer, net, width)
             if neighbour:
-                _mark_segment(grid, neighbour["x1"], neighbour["y1"],
+                _clear_segment(grid, n_x1, n_y1, n_x2, n_y2,
+                               neighbour["layer"], neighbour["net"],
+                               float(neighbour.get("width", 0.25) or 0.25))
+            _mark_segment(grid, seg["x1"], seg["y1"],
+                          seg["x2"], seg["y2"], layer, net, width)
+            if neighbour:
+                _mark_segment(grid,
+                              neighbour["x1"], neighbour["y1"],
                               neighbour["x2"], neighbour["y2"],
                               neighbour["layer"], neighbour["net"],
                               float(neighbour.get("width", 0.25) or 0.25))

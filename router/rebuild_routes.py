@@ -26,7 +26,7 @@ from collections import defaultdict
 import math
 
 
-SNAP_TOL = 0.05      # mm — endpoints closer than this are the same node
+SNAP_TOL = 0.1      # mm — endpoints closer than this are the same node
 PAD_SNAP_TOL = 0.1   # mm — segment endpoints within this of a pad centre
                       #       are snapped exactly to the pad centre
 
@@ -109,20 +109,42 @@ def rebuild_routes(tracks, pads, vias, layer_ids=None):
         all_routes.extend(routes)
 
     return all_routes
-
-
 def _rebuild_net(net_name, segs, pad_at, via_at, layer_ids, pad_centres):
     """Rebuild routes for a single net.
 
     Segment endpoints are snapped to nearby pad centres before graph
-    construction to eliminate tiny stub artefacts.
+    construction to eliminate tiny stub artefacts. Consecutive segment
+    endpoints that are within CHAIN_TOL of each other are forced to match
+    exactly to eliminate sub-grid gaps.
     """
+    CHAIN_TOL = 0.15  # mm — slightly larger than SNAP_TOL to catch gaps
+
     seg_list = []
     for seg in segs:
         # Snap both endpoints to nearby pad centres
         x1, y1 = _snap_to_pad(seg["x1"], seg["y1"], pad_centres)
         x2, y2 = _snap_to_pad(seg["x2"], seg["y2"], pad_centres)
         seg_list.append({**seg, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+
+    # Force matching endpoints between adjacent segments
+    result = [dict(s) for s in seg_list]
+    for i in range(len(result)):
+        for j in range(len(result)):
+            if i == j:
+                continue
+            # end of i close to start of j
+            d = math.hypot(result[i]["x2"] - result[j]["x1"],
+                           result[i]["y2"] - result[j]["y1"])
+            if 0 < d < CHAIN_TOL:
+                result[j]["x1"] = result[i]["x2"]
+                result[j]["y1"] = result[i]["y2"]
+            # end of i close to end of j
+            d = math.hypot(result[i]["x2"] - result[j]["x2"],
+                           result[i]["y2"] - result[j]["y2"])
+            if 0 < d < CHAIN_TOL:
+                result[j]["x2"] = result[i]["x2"]
+                result[j]["y2"] = result[i]["y2"]
+    seg_list = result
 
     # Layer-agnostic adjacency graph
     adj = defaultdict(set)
@@ -340,6 +362,39 @@ def diagnose_routes(routes):
 
     return stub_violations
 
+
+def _snap_segments_to_chain(seg_list):
+    """Snap consecutive segment endpoints to match exactly.
+    
+    Sorts segments into chains by proximity and forces shared endpoints
+    to be identical, eliminating sub-grid gaps between adjacent segments.
+    """
+    if len(seg_list) < 2:
+        return seg_list
+
+    # Build adjacency by proximity
+    CHAIN_TOL = 0.15  # mm — slightly larger than SNAP_TOL to catch gaps
+
+    result = [dict(s) for s in seg_list]
+
+    for i in range(len(result)):
+        for j in range(len(result)):
+            if i == j:
+                continue
+            # Check if end of i is close to start of j
+            d = math.hypot(result[i]["x2"] - result[j]["x1"],
+                           result[i]["y2"] - result[j]["y1"])
+            if d < CHAIN_TOL and d > 0:
+                result[j]["x1"] = result[i]["x2"]
+                result[j]["y1"] = result[i]["y2"]
+            # Check if end of i is close to end of j
+            d = math.hypot(result[i]["x2"] - result[j]["x2"],
+                           result[i]["y2"] - result[j]["y2"])
+            if d < CHAIN_TOL and d > 0:
+                result[j]["x2"] = result[i]["x2"]
+                result[j]["y2"] = result[i]["y2"]
+
+    return result
 
 if __name__ == "__main__":
     import json

@@ -17,6 +17,8 @@ import numpy as np
 
 
 GRID_PITCH = 0.1  # mm per grid cell
+def snap_coord(v):
+    return round(round(v / GRID_PITCH) * GRID_PITCH, 4)
 
 LAYER_FCU = 0
 LAYER_BCU = 1

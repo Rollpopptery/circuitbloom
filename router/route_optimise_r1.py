@@ -32,10 +32,10 @@ import math
 import random
 from collections import defaultdict
 
-from dpcb_router_grid import GRID_PITCH, _line_cells_fast
+from dpcb_router_grid import GRID_PITCH, snap_coord, _line_cells_fast
 
 
-SNAP_TOL = 0.05  # mm
+SNAP_TOL = 0.1  # mm
 
 
 def _snap(x, y):
@@ -112,7 +112,6 @@ def _reconstruct_chains(tracks, pads, vias):
                 points = [start]
                 segs_in_chain = []
 
-                prev = start
                 curr = neighbor
                 segs_in_chain.append(seg)
                 used_pairs.add(pair)
@@ -170,13 +169,8 @@ def _reconstruct_chains(tracks, pads, vias):
 # ============================================================
 # CLEARANCE TEST
 # ============================================================
-def _test_segment_clearance(grid, x1, y1, x2, y2, layer_name, net, width):
-    """Test if a segment passes clearance. Returns True if clear.
 
-    Uses grid.get_cell() which checks both pad_grid (permanent pad copper
-    and clearance zones) and route_grid (placed traces). This ensures the
-    optimiser never moves a trace into a pad clearance zone.
-    """
+def _test_segment_clearance(grid, x1, y1, x2, y2, layer_name, net, width):
     layer_id = grid.layer_ids.get(layer_name)
     if layer_id is None:
         return False
@@ -199,7 +193,6 @@ def _test_segment_clearance(grid, x1, y1, x2, y2, layer_name, net, width):
                 nx, ny = cx + dx, cy + dy
                 if not (0 <= nx < grid.width and 0 <= ny < grid.height):
                     continue
-                # get_cell() checks pad_grid first, then route_grid
                 occ = int(occ_grid[ny, nx])
                 if occ == 0 or occ == nid_self:
                     continue
@@ -239,7 +232,6 @@ def _mark_segment(grid, x1, y1, x2, y2, layer_name, net, width):
 
 
 def _seg_key(t):
-    """Unique key for a track segment by snapped endpoints."""
     return (_snap(t["x1"], t["y1"]), _snap(t["x2"], t["y2"]))
 
 
@@ -250,110 +242,206 @@ def _seg_key(t):
 def optimise_pass(state, grid, lock, step_mm=0.5):
     """Single random-point rubber-band relaxation step.
 
-    Picks one moveable junction point at random, tries to move it
-    step_mm toward the midpoint of its neighbours, tests clearance
-    on the two affected segments, accepts or restores.
+    For chains of 3+ segments between fixed points, first attempts to
+    collapse the entire chain into a direct 2-segment L-shaped path.
+    Falls back to nudging the junction point step_mm toward the midpoint
+    of its neighbours (or along the bisector for right angles) if collapse
+    fails clearance.
 
     Args:
         state:   route server state dict
         grid:    RouterGrid
         lock:    threading.Lock
-        step_mm: move distance (default 0.5mm)
+        step_mm: nudge distance for fallback (default 0.5mm)
 
     Returns:
         dict with moved (bool), net, shortening_mm, reason
     """
     with lock:
         tracks = list(state["tracks"])
-        pads = list(state["pads"])
-        vias = list(state["vias"])
+        pads   = list(state["pads"])
+        vias   = list(state["vias"])
 
     candidates = _reconstruct_chains(tracks, pads, vias)
 
     if not candidates:
         return {"moved": False, "reason": "no moveable points"}
 
-    # Shuffle and try candidates until one succeeds or all exhausted
     random.shuffle(candidates)
 
     for c in candidates:
-        net = c["net"]
-        px, py = c["px"], c["py"]
+        net            = c["net"]
+        px,  py        = c["px"],     c["py"]
         prev_x, prev_y = c["prev_x"], c["prev_y"]
         next_x, next_y = c["next_x"], c["next_y"]
+        seg_b          = c["seg_before"]
+        seg_a          = c["seg_after"]
+        layer_b        = c["layer_before"]
+        layer_a        = c["layer_after"]
+        width_b        = c["width_before"]
+        width_a        = c["width_after"]
 
-        # Midpoint target
-        mid_x = (prev_x + next_x) / 2
-        mid_y = (prev_y + next_y) / 2
+        old_len = (_length(prev_x, prev_y, px,     py) +
+                   _length(px,     py,     next_x, next_y))
 
-        dx = mid_x - px
-        dy = mid_y - py
-        dist = math.hypot(dx, dy)
+        # ── attempt 1: collapse to direct 2-segment L-path ───────────────
+        if layer_b == layer_a:
+            corners = [
+                (next_x, prev_y),
+                (prev_x, next_y),
+            ]
 
-        if dist < 1e-6:
-            continue  # already at midpoint
+            for cx, cy in corners:
+                seg1_len = _length(prev_x, prev_y, cx, cy)
+                seg2_len = _length(cx, cy, next_x, next_y)
+                if seg1_len < 1e-6 or seg2_len < 1e-6:
+                    continue
 
-        move = min(step_mm, dist)
-        new_x = px + (dx / dist) * move
-        new_y = py + (dy / dist) * move
+                new_len = seg1_len + seg2_len
+                if new_len >= old_len - 1e-6:
+                    continue
 
-        old_len = (_length(prev_x, prev_y, px, py) +
-                   _length(px, py, next_x, next_y))
+                _clear_segment(grid, seg_b["x1"], seg_b["y1"],
+                               seg_b["x2"], seg_b["y2"],
+                               layer_b, net, width_b)
+                _clear_segment(grid, seg_a["x1"], seg_a["y1"],
+                               seg_a["x2"], seg_a["y2"],
+                               layer_a, net, width_a)
+
+                ok1 = _test_segment_clearance(
+                    grid, prev_x, prev_y, cx, cy, layer_b, net, width_b)
+                ok2 = _test_segment_clearance(
+                    grid, cx, cy, next_x, next_y, layer_a, net, width_a) if ok1 else False
+
+                if ok1 and ok2:
+                    _mark_segment(grid, prev_x, prev_y, cx, cy,
+                                  layer_b, net, width_b)
+                    _mark_segment(grid, cx, cy, next_x, next_y,
+                                  layer_a, net, width_a)
+
+                    new_seg_b = {
+                        "x1": snap_coord(prev_x), "y1": snap_coord(prev_y),
+                        "x2": snap_coord(cx),     "y2": snap_coord(cy),
+                        "layer": layer_b, "width": width_b, "net": net,
+                    }
+                    new_seg_a = {
+                        "x1": snap_coord(cx),     "y1": snap_coord(cy),
+                        "x2": snap_coord(next_x), "y2": snap_coord(next_y),
+                        "layer": layer_a, "width": width_a, "net": net,
+                    }
+
+                    key_b = _seg_key(seg_b)
+                    key_a = _seg_key(seg_a)
+
+                    with lock:
+                        new_tracks = []
+                        replaced_b = replaced_a = False
+                        for t in state["tracks"]:
+                            k = _seg_key(t)
+                            if k == key_b and not replaced_b:
+                                new_tracks.append(new_seg_b)
+                                replaced_b = True
+                            elif k == key_a and not replaced_a:
+                                new_tracks.append(new_seg_a)
+                                replaced_a = True
+                            else:
+                                new_tracks.append(t)
+                        state["tracks"] = new_tracks
+                        state["version"] += 1
+
+                    return {
+                        "moved":         True,
+                        "net":           net,
+                        "shortening_mm": round(old_len - new_len, 4),
+                        "method":        "collapse",
+                    }
+
+                else:
+                    _mark_segment(grid, seg_b["x1"], seg_b["y1"],
+                                  seg_b["x2"], seg_b["y2"],
+                                  layer_b, net, width_b)
+                    _mark_segment(grid, seg_a["x1"], seg_a["y1"],
+                                  seg_a["x2"], seg_a["y2"],
+                                  layer_a, net, width_a)
+
+        # ── attempt 2: nudge toward midpoint or along bisector ───────────
+        v1x, v1y = prev_x - px, prev_y - py
+        v2x, v2y = next_x - px, next_y - py
+        v1_len   = math.hypot(v1x, v1y)
+        v2_len   = math.hypot(v2x, v2y)
+
+        if v1_len < 1e-6 or v2_len < 1e-6:
+            continue
+
+        v1x, v1y = v1x / v1_len, v1y / v1_len
+        v2x, v2y = v2x / v2_len, v2y / v2_len
+
+        dot = v1x * v2x + v1y * v2y
+        is_right_angle = abs(dot) < 0.15  # within ~9° of 90°
+
+        if is_right_angle:
+            bx, by = v1x + v2x, v1y + v2y
+            b_len  = math.hypot(bx, by)
+            if b_len < 1e-6:
+                continue
+            bx, by = bx / b_len, by / b_len
+            new_x  = px + bx * step_mm
+            new_y  = py + by * step_mm
+        else:
+            mid_x = (prev_x + next_x) / 2
+            mid_y = (prev_y + next_y) / 2
+            dx    = mid_x - px
+            dy    = mid_y - py
+            dist  = math.hypot(dx, dy)
+            if dist < 1e-6:
+                continue
+            move  = min(step_mm, dist)
+            new_x = px + (dx / dist) * move
+            new_y = py + (dy / dist) * move
+
         new_len = (_length(prev_x, prev_y, new_x, new_y) +
-                   _length(new_x, new_y, next_x, next_y))
+                   _length(new_x,  new_y,  next_x, next_y))
 
         if new_len >= old_len - 1e-6:
-            continue  # no improvement
+            continue
 
-        seg_b = c["seg_before"]
-        seg_a = c["seg_after"]
-
-        # Clear old segments from grid
         _clear_segment(grid, seg_b["x1"], seg_b["y1"],
                        seg_b["x2"], seg_b["y2"],
-                       c["layer_before"], net, c["width_before"])
+                       layer_b, net, width_b)
         _clear_segment(grid, seg_a["x1"], seg_a["y1"],
                        seg_a["x2"], seg_a["y2"],
-                       c["layer_after"], net, c["width_after"])
+                       layer_a, net, width_a)
 
-        # Test new segments
         ok_b = _test_segment_clearance(
             grid, prev_x, prev_y, new_x, new_y,
-            c["layer_before"], net, c["width_before"])
+            layer_b, net, width_b)
         ok_a = _test_segment_clearance(
             grid, new_x, new_y, next_x, next_y,
-            c["layer_after"], net, c["width_after"])
+            layer_a, net, width_a) if ok_b else False
 
         if ok_b and ok_a:
-            # Accept — mark new segments on grid
             _mark_segment(grid, prev_x, prev_y, new_x, new_y,
-                          c["layer_before"], net, c["width_before"])
+                          layer_b, net, width_b)
             _mark_segment(grid, new_x, new_y, next_x, next_y,
-                          c["layer_after"], net, c["width_after"])
+                          layer_a, net, width_a)
 
-            # Replace the two segments in state atomically
             key_b = _seg_key(seg_b)
             key_a = _seg_key(seg_a)
 
             new_seg_b = {
-                "x1": round(prev_x, 3), "y1": round(prev_y, 3),
-                "x2": round(new_x, 3),  "y2": round(new_y, 3),
-                "layer": c["layer_before"],
-                "width": c["width_before"],
-                "net": net,
+                "x1": snap_coord(prev_x), "y1": snap_coord(prev_y),
+                "x2": snap_coord(new_x),  "y2": snap_coord(new_y),
+                "layer": layer_b, "width": width_b, "net": net,
             }
             new_seg_a = {
-                "x1": round(new_x, 3),  "y1": round(new_y, 3),
-                "x2": round(next_x, 3), "y2": round(next_y, 3),
-                "layer": c["layer_after"],
-                "width": c["width_after"],
-                "net": net,
+                "x1": snap_coord(new_x),  "y1": snap_coord(new_y),
+                "x2": snap_coord(next_x), "y2": snap_coord(next_y),
+                "layer": layer_a, "width": width_a, "net": net,
             }
 
             with lock:
                 new_tracks = []
-                replaced_b = False
-                replaced_a = False
+                replaced_b = replaced_a = False
                 for t in state["tracks"]:
                     k = _seg_key(t)
                     if k == key_b and not replaced_b:
@@ -368,18 +456,18 @@ def optimise_pass(state, grid, lock, step_mm=0.5):
                 state["version"] += 1
 
             return {
-                "moved": True,
-                "net": net,
+                "moved":         True,
+                "net":           net,
                 "shortening_mm": round(old_len - new_len, 4),
+                "method":        "nudge",
             }
 
         else:
-            # Restore old segments to grid
             _mark_segment(grid, seg_b["x1"], seg_b["y1"],
                           seg_b["x2"], seg_b["y2"],
-                          c["layer_before"], net, c["width_before"])
+                          layer_b, net, width_b)
             _mark_segment(grid, seg_a["x1"], seg_a["y1"],
                           seg_a["x2"], seg_a["y2"],
-                          c["layer_after"], net, c["width_after"])
+                          layer_a, net, width_a)
 
     return {"moved": False, "reason": "no improvements found"}
