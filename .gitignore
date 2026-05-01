@@ -13,3 +13,4 @@ temp/
 !*.js
 !*.css
 !*.svg
+!*.yml
