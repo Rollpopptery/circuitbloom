@@ -29,7 +29,7 @@ jobs:
         working-directory: schematic-tool
 
       - name: Build
-        run: npm run build
+        run: npx vite build
         working-directory: schematic-tool
 
       - uses: actions/upload-pages-artifact@v3
