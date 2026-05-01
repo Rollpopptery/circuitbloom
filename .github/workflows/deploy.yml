@@ -7,6 +7,9 @@ on:
       - 'schematic-tool/**'
       - '.github/workflows/deploy.yml'
 
+permissions:
+  contents: write
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
