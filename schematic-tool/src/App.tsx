@@ -129,6 +129,9 @@ export default function App() {
           <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
             <PropertiesPanel />
           </div>
+          <div style={{ padding: "8px 12px", borderTop: "1px solid #e0e0e0", fontSize: 11, color: "#bbb", textAlign: "right" }}>
+            v{__APP_VERSION__}
+          </div>
         </div>
       </div>
     </div>

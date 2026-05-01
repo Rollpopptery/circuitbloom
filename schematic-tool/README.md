@@ -1,73 +1,33 @@
-# React + TypeScript + Vite
+# Circuit Bloom
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Browser-based SPICE simulation cockpit for KiCad schematics.
 
-Currently, two official plugins are available:
+**[Live demo](https://rollpopptery.github.io/circuitbloom/)**
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Features
 
-## React Compiler
+- Load `.kicad_sch` schematics or saved `.spice-project.json` files
+- Interactive schematic viewer with pan/zoom
+- Place up to 4 voltage probes by clicking wires
+- Per-component SPICE templates and model definitions
+- Transient, AC, and DC sweep analysis
+- Runs [ngspice](https://ngspice.sourceforge.io/) fully in-browser via WebAssembly — no server required
+- Waveform plot with min/max decimation for large datasets
+- Save/load projects (File System Access API with download fallback)
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Tech Stack
 
-## Expanding the ESLint configuration
+- React + TypeScript + Vite
+- [eecircuit-engine](https://www.npmjs.com/package/eecircuit-engine) — ngspice compiled to WASM
+- Zustand for state management
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Running Locally
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Supported KiCad Symbols
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+Any KiCad schematic symbol can be simulated by setting a SPICE template and model in the Properties panel. Built-in defaults are provided for R, C, L, D, Q (BJT), M (MOSFET), V, and I.
