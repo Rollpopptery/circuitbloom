@@ -1,0 +1,171 @@
+{
+  "version": 12,
+  "areas": "\"power brain interface\"",
+  "cols": 3,
+  "groups": {
+    "j2": "",
+    "power": "<div class=\"dense\" data-cols=\"10\" style=\"grid-template-columns:repeat(10,28px)\"><div style=\"grid-column:span 6;grid-row:span 9\">J1</div><div style=\"grid-column:span 4;grid-row:span 5\">U1</div><div style=\"grid-column:span 5;grid-row:span 2\">D3</div><div style=\"grid-column:span 5;grid-row:span 2\">C1</div></div>",
+    "usb-data": "",
+    "mcu": "",
+    "pwr-led": "",
+    "periph": "",
+    "j3": "",
+    "main": "",
+    "brain": "<div class=\"dense\" data-cols=\"11\" style=\"grid-template-columns:repeat(11,28px)\"><div style=\"grid-column:span 10;grid-row:span 8\">U2</div><div style=\"grid-column:span 5;grid-row:span 2\">C2</div></div>",
+    "interface": "<div class=\"dense\" data-cols=\"21\" style=\"grid-template-columns:repeat(21,28px)\"><div style=\"grid-column:span 21;grid-row:span 4\">J2</div><div style=\"grid-column:span 5;grid-row:span 2\">D2</div><div style=\"grid-column:span 5;grid-row:span 2\">R1</div><div style=\"grid-column:span 5;grid-row:span 2\">R3</div><div style=\"grid-column:span 5;grid-row:span 2\">D1</div><div style=\"grid-column:span 5;grid-row:span 2\">R2</div><div style=\"grid-column:span 5;grid-row:span 4\">SW1</div><div style=\"grid-column:span 5;grid-row:span 2\">R6</div><div style=\"grid-column:span 5;grid-row:span 2\">D5</div><div style=\"grid-column:span 5;grid-row:span 2\">R5</div><div style=\"grid-column:span 5;grid-row:span 2\">D4</div><div style=\"grid-column:span 5;grid-row:span 2\">R4</div><div style=\"grid-column:span 21;grid-row:span 4\">J3</div></div>"
+  },
+  "components": {
+    "R1": {
+      "shape": [
+        5,
+        2
+      ],
+      "rotation": 0,
+      "type": "0603_R"
+    },
+    "R2": {
+      "shape": [
+        5,
+        2
+      ],
+      "rotation": 0,
+      "type": "0603_R"
+    },
+    "R3": {
+      "shape": [
+        5,
+        2
+      ],
+      "rotation": 0,
+      "type": "0603_R"
+    },
+    "R4": {
+      "shape": [
+        5,
+        2
+      ],
+      "rotation": 0,
+      "type": "0603_R"
+    },
+    "R5": {
+      "shape": [
+        5,
+        2
+      ],
+      "rotation": 0,
+      "type": "0603_R"
+    },
+    "R6": {
+      "shape": [
+        5,
+        2
+      ],
+      "rotation": 0,
+      "type": "0603_R"
+    },
+    "C1": {
+      "shape": [
+        5,
+        2
+      ],
+      "rotation": 0,
+      "type": "0805_C"
+    },
+    "C2": {
+      "shape": [
+        5,
+        2
+      ],
+      "rotation": 0,
+      "type": "0805_C"
+    },
+    "D1": {
+      "shape": [
+        5,
+        2
+      ],
+      "rotation": 0,
+      "type": "SOD-323"
+    },
+    "D2": {
+      "shape": [
+        5,
+        2
+      ],
+      "rotation": 0,
+      "type": "SOD-323"
+    },
+    "D3": {
+      "shape": [
+        5,
+        2
+      ],
+      "rotation": 0,
+      "type": "SOD-123F"
+    },
+    "D4": {
+      "shape": [
+        5,
+        2
+      ],
+      "rotation": 0,
+      "type": "0603_LED"
+    },
+    "D5": {
+      "shape": [
+        5,
+        2
+      ],
+      "rotation": 0,
+      "type": "0603_LED"
+    },
+    "U1": {
+      "shape": [
+        4,
+        5
+      ],
+      "rotation": 90,
+      "type": "SOT-23-5"
+    },
+    "U2": {
+      "shape": [
+        10,
+        8
+      ],
+      "rotation": 0,
+      "type": "SOIC-14"
+    },
+    "J1": {
+      "shape": [
+        6,
+        9
+      ],
+      "rotation": 270,
+      "type": "USB_Micro-B"
+    },
+    "J2": {
+      "shape": [
+        21,
+        4
+      ],
+      "rotation": 90,
+      "type": "1x08_Header"
+    },
+    "J3": {
+      "shape": [
+        21,
+        4
+      ],
+      "rotation": 90,
+      "type": "1x08_Header"
+    },
+    "SW1": {
+      "shape": [
+        5,
+        4
+      ],
+      "rotation": 0,
+      "type": "SW_B3U"
+    }
+  }
+}

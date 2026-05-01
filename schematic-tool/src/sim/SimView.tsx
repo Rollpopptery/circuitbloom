@@ -53,6 +53,7 @@ interface Channel {
   values: number[];
 }
 
+interface View { x1: number; x2: number; y1: number; y2: number; }
 interface PlotProps {
   xData: number[];
   channels: Channel[];
@@ -60,28 +61,105 @@ interface PlotProps {
 
 function WaveformPlot({ xData, channels }: PlotProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
   const { w, h } = useElementSize(containerRef);
   const PAD = { t: 16, r: 20, b: 44, l: 68 };
   const pw = w - PAD.l - PAD.r, ph = h - PAD.t - PAD.b;
 
-  let yMin = Infinity, yMax = -Infinity;
+  // Full data range
+  let dataYMin = Infinity, dataYMax = -Infinity;
   for (const ch of channels)
     for (const v of ch.values)
-      if (isFinite(v)) { if (v < yMin) yMin = v; if (v > yMax) yMax = v; }
-  if (!isFinite(yMin)) { yMin = -1; yMax = 1; }
-  if (yMin === yMax) { yMin -= 1; yMax += 1; }
-  const xMin = xData[0] ?? 0, xMax = xData[xData.length - 1] ?? 1;
+      if (isFinite(v)) { if (v < dataYMin) dataYMin = v; if (v > dataYMax) dataYMax = v; }
+  if (!isFinite(dataYMin)) { dataYMin = -1; dataYMax = 1; }
+  if (dataYMin === dataYMax) { dataYMin -= 1; dataYMax += 1; }
+  const dataXMin = xData[0] ?? 0, dataXMax = xData[xData.length - 1] ?? 1;
+  const fullView: View = { x1: dataXMin, x2: dataXMax, y1: dataYMin, y2: dataYMax };
 
+  const [view, setView] = useState<View | null>(null);
+  const [drag, setDrag] = useState<{
+    type: 'box' | 'pan';
+    px0: number; py0: number;
+    px1: number; py1: number;
+    baseView: View;
+  } | null>(null);
+
+  // Reset view when a new simulation result arrives
+  const xKey = `${dataXMin},${dataXMax},${xData.length}`;
+  useEffect(() => { setView(null); setDrag(null); }, [xKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const committedView = view ?? fullView;
+  let renderView = committedView;
+  if (drag?.type === 'pan') {
+    const dxData = -((drag.px1 - drag.px0) / pw) * (drag.baseView.x2 - drag.baseView.x1);
+    const dyData = ((drag.py1 - drag.py0) / ph) * (drag.baseView.y2 - drag.baseView.y1);
+    renderView = {
+      x1: drag.baseView.x1 + dxData, x2: drag.baseView.x2 + dxData,
+      y1: drag.baseView.y1 + dyData, y2: drag.baseView.y2 + dyData,
+    };
+  }
+
+  const { x1: xMin, x2: xMax, y1: yMin, y2: yMax } = renderView;
   const sx = (x: number) => PAD.l + ((x - xMin) / (xMax - xMin)) * pw;
   const sy = (y: number) => PAD.t + (1 - (y - yMin) / (yMax - yMin)) * ph;
+  const invX = (px: number) => xMin + ((px - PAD.l) / pw) * (xMax - xMin);
+  const invY = (py: number) => yMax - ((py - PAD.t) / ph) * (yMax - yMin);
 
   const xTicks = niceTicks(xMin, xMax, Math.max(3, Math.floor(pw / 100)));
   const yTicks = niceTicks(yMin, yMax, Math.max(3, Math.floor(ph / 60)));
 
+  function svgXY(e: React.MouseEvent): [number, number] {
+    const r = svgRef.current!.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
+  }
+
+  function handleMouseDown(e: React.MouseEvent) {
+    if (e.button === 2) e.preventDefault();
+    const [px, py] = svgXY(e);
+    const type = e.button === 2 ? 'pan' : 'box';
+    setDrag({ type, px0: px, py0: py, px1: px, py1: py, baseView: renderView });
+  }
+
+  function handleMouseMove(e: React.MouseEvent) {
+    if (!drag) return;
+    const [px, py] = svgXY(e);
+    setDrag(d => d ? { ...d, px1: px, py1: py } : null);
+  }
+
+  function handleMouseUp() {
+    if (!drag) return;
+    if (drag.type === 'box') {
+      const dx = Math.abs(drag.px1 - drag.px0), dy = Math.abs(drag.py1 - drag.py0);
+      if (dx > 8 || dy > 8) {
+        const left = Math.min(drag.px0, drag.px1), right = Math.max(drag.px0, drag.px1);
+        const top = Math.min(drag.py0, drag.py1), bottom = Math.max(drag.py0, drag.py1);
+        setView({ x1: invX(left), x2: invX(right), y1: invY(bottom), y2: invY(top) });
+      }
+    } else {
+      setView(renderView);
+    }
+    setDrag(null);
+  }
+
+  const boxRect = drag?.type === 'box' ? {
+    x: Math.min(drag.px0, drag.px1), y: Math.min(drag.py0, drag.py1),
+    width: Math.abs(drag.px1 - drag.px0), height: Math.abs(drag.py1 - drag.py0),
+  } : null;
+
+  const cursor = drag?.type === 'pan' ? 'grabbing' : 'crosshair';
+
   return (
     <div ref={containerRef} style={{ flex: 1, minHeight: 0, minWidth: 0, overflow: "hidden" }}>
       {w > 0 && (
-        <svg width={w} height={h} style={{ display: "block" }}>
+        <svg ref={svgRef} width={w} height={h}
+          style={{ display: "block", cursor, userSelect: "none" }}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
+          onDoubleClick={() => setView(null)}
+          onContextMenu={e => e.preventDefault()}
+        >
           {/* grid */}
           {yTicks.map(t => (
             <line key={t} x1={PAD.l} x2={PAD.l + pw} y1={sy(t)} y2={sy(t)} stroke="#333" strokeWidth={1} />
@@ -129,6 +207,15 @@ function WaveformPlot({ xData, channels }: PlotProps) {
             ).join(" ");
             return <path key={ch.name} d={d} stroke={ch.color} strokeWidth={2} fill="none" />;
           })}
+          {/* box select overlay */}
+          {boxRect && (
+            <rect x={boxRect.x} y={boxRect.y} width={boxRect.width} height={boxRect.height}
+              fill="rgba(100,160,255,0.12)" stroke="rgba(100,160,255,0.8)" strokeWidth={1} strokeDasharray="4 2" />
+          )}
+          {/* hint */}
+          {!view && (
+            <text x={PAD.l + pw} y={PAD.t - 2} textAnchor="end" fontSize={10} fill="#555">drag to zoom · right-drag to pan · dbl-click to reset</text>
+          )}
         </svg>
       )}
     </div>
