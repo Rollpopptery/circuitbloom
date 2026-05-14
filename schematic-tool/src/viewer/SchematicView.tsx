@@ -61,7 +61,7 @@ export function SchematicView() {
           <feDropShadow dx="0" dy="0" stdDeviation="1.5" floodColor="#2196F3" floodOpacity="0.85" />
         </filter>
       </defs>
-      <rect width="100%" height="100%" fill="url(#grid)" />
+      <rect width="100%" height="100%" fill="#fff" />
 
       {subcircuit ? (
         <g transform={transform}>

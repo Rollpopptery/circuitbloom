@@ -84,6 +84,7 @@ export function extractNetlist(schematic: Schematic): Netlist {
       const root = uf.find(snapKey(world));
       const node = nodeOf(root);
       pinNets[pin.id] = node;
+      if (pin.name && pin.name !== pin.id) pinNets[pin.name] = node;
       if (!netPins.has(node)) netPins.set(node, []);
       netPins.get(node)!.push({ refdes: comp.refdes, pinId: pin.id });
     }

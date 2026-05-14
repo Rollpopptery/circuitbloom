@@ -21,7 +21,7 @@ function fmtNum(v: number): string {
 }
 
 function WaveformPlot({ result }: { result: SimResult }) {
-  const W = 248, H = 200, PAD = { t: 6, r: 4, b: 18, l: 38 };
+  const W = 248, H = 170, PAD = { t: 6, r: 4, b: 18, l: 38 };
   const pw = W - PAD.l - PAD.r, ph = H - PAD.t - PAD.b;
 
   const xData = result.data[0] ?? [];
@@ -123,7 +123,7 @@ export function SimPanel() {
   });
 
   return (
-    <div style={{ borderTop: "2px solid #d0d0d0", background: "#f5f5f5", padding: "10px 12px 12px", flexShrink: 0 }}>
+    <div style={{ borderTop: "2px solid #d0d0d0", background: "#f5f5f5", padding: "6px 12px 8px", flexShrink: 0 }}>
       <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", color: "#999", textTransform: "uppercase", marginBottom: 8 }}>
         Simulation
       </div>
@@ -193,19 +193,6 @@ export function SimPanel() {
         {status === "running" ? "Running…" : "▶ Run"}
       </button>
 
-      {error && (
-        <pre style={{ fontSize: 10, color: "#e53935", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "0 0 6px", maxHeight: 80, overflowY: "auto" }}>
-          {error}
-        </pre>
-      )}
-
-      {result && (
-        <>
-          <WaveformPlot result={result} />
-          <Legend result={result} />
-        </>
-      )}
-
       {spiceText && (
         <>
           <button
@@ -222,6 +209,19 @@ export function SimPanel() {
               style={{ width: "100%", boxSizing: "border-box", fontFamily: "monospace", fontSize: 10, border: "1px solid #ddd", borderRadius: 3, resize: "vertical", background: "#fff", color: "#333" }}
             />
           )}
+        </>
+      )}
+
+      {error && (
+        <pre style={{ fontSize: 10, color: "#e53935", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "0 0 6px", maxHeight: 80, overflowY: "auto" }}>
+          {error}
+        </pre>
+      )}
+
+      {result && (
+        <>
+          <WaveformPlot result={result} />
+          <Legend result={result} />
         </>
       )}
     </div>

@@ -28,7 +28,7 @@ function resolveTemplate(
 ): string {
   return template
     .replace(/\{refdes\}/g, refdes)
-    .replace(/\{(\d+)\}/g, (_, n) => pinNets[n] ?? `_NC${n}`);
+    .replace(/\{([^{}]+)\}/g, (_, n) => pinNets[n] ?? `_NC${n}`);
 }
 
 export function formatSpice(

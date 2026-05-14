@@ -28,6 +28,9 @@ npm install
 npm run dev
 ```
 
+
 ## Supported KiCad Symbols
 
 Any KiCad schematic symbol can be simulated by setting a SPICE template and model in the Properties panel. Built-in defaults are provided for R, C, L, D, Q (BJT), M (MOSFET), V, and I.
+
+SPICE templates use named pin placeholders that map directly to KiCad pin names — for example `{A}` and `{K}` for diode anode/cathode, `{C}`, `{B}`, `{E}` for BJT, `{D}`, `{G}`, `{S}` for MOSFET. The Pin → Net table in the Properties panel shows the available placeholders for each component.

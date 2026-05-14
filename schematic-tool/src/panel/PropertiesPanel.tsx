@@ -11,6 +11,29 @@ import {
   previewTemplate,
 } from "../utils/spice";
 
+function extractModelNames(modelText: string): string[] {
+  return [...modelText.matchAll(/\.(?:model|subckt)\s+(\S+)/gi)].map(m => m[1].toLowerCase());
+}
+
+function findDuplicateModels(
+  currentRefdes: string,
+  currentModel: string,
+  allParams: Record<string, { model?: string }>
+): Array<{ name: string; owner: string }> {
+  const currentNames = extractModelNames(currentModel);
+  if (currentNames.length === 0) return [];
+  const conflicts: Array<{ name: string; owner: string }> = [];
+  for (const [refdes, params] of Object.entries(allParams)) {
+    if (refdes === currentRefdes || !params.model) continue;
+    for (const name of extractModelNames(params.model)) {
+      if (currentNames.includes(name)) {
+        conflicts.push({ name, owner: refdes });
+      }
+    }
+  }
+  return conflicts;
+}
+
 function findInstance(schematic: Schematic, refdes: string): ComponentInstance | null {
   for (const sub of Object.values(schematic.subcircuits)) {
     const found = sub.components.find((c) => c.refdes === refdes);
@@ -87,6 +110,7 @@ function ComponentPanel({ instance, schematic }: ComponentPanelProps) {
 
   const primaryToken = extractPrimaryToken(template, instance.refdes);
   const templateError = validateTemplate(template);
+  const modelConflicts = findDuplicateModels(instance.refdes, model, componentParams);
 
   const colonIdx = instance.symbolId.indexOf(":");
   const libName = colonIdx >= 0 ? instance.symbolId.slice(0, colonIdx) : "—";
@@ -220,7 +244,7 @@ function ComponentPanel({ instance, schematic }: ComponentPanelProps) {
             fontFamily: "monospace",
             fontSize: 11,
             padding: "6px 8px",
-            border: "1px solid #ccc",
+            border: `1px solid ${modelConflicts.length > 0 ? "#f57c00" : "#ccc"}`,
             borderRadius: 4,
             resize: "vertical",
             outline: "none",
@@ -228,6 +252,13 @@ function ComponentPanel({ instance, schematic }: ComponentPanelProps) {
             color: model ? "#1a1a1a" : "#aaa",
           }}
         />
+        {modelConflicts.length > 0 && (
+          <div style={{ color: "#f57c00", fontSize: 11, marginTop: 3 }}>
+            {modelConflicts.map(c =>
+              `"${c.name}" already defined on ${c.owner}`
+            ).join(" · ")}
+          </div>
+        )}
       </div>
 
       <Divider />
@@ -246,18 +277,23 @@ function ComponentPanel({ instance, schematic }: ComponentPanelProps) {
           >
             <thead>
               <tr>
-                <th style={{ textAlign: "left", padding: "2px 12px", fontWeight: 600, fontSize: 10, color: "#aaa", textTransform: "uppercase" }}>Template</th>
-                <th style={{ textAlign: "left", padding: "2px 4px", fontWeight: 600, fontSize: 10, color: "#aaa", textTransform: "uppercase" }}>Pin Name</th>
+                <th style={{ textAlign: "left", padding: "2px 12px", fontWeight: 600, fontSize: 10, color: "#aaa", textTransform: "uppercase" }}>Placeholder</th>
+                <th style={{ textAlign: "left", padding: "2px 4px", fontWeight: 600, fontSize: 10, color: "#aaa", textTransform: "uppercase" }}>Pin #</th>
                 <th style={{ textAlign: "left", padding: "2px 4px", fontWeight: 600, fontSize: 10, color: "#aaa", textTransform: "uppercase" }}>Net</th>
               </tr>
             </thead>
             <tbody>
               {symbol.pins.map((pin) => {
-                const net = pinNets[pin.id];
+                const net = pinNets[pin.name] ?? pinNets[pin.id];
+                const primary = pin.name && pin.name !== pin.id ? `{${pin.name}}` : `{${pin.id}}`;
+                const secondary = pin.name && pin.name !== pin.id ? ` / {${pin.id}}` : "";
                 return (
                   <tr key={pin.id} style={{ borderTop: "1px solid #f0f0f0" }}>
-                    <td style={{ padding: "3px 12px", color: "#1565C0", fontFamily: "monospace", fontWeight: 700 }}>{`{${pin.id}}`}</td>
-                    <td style={{ padding: "3px 4px", color: "#333", fontWeight: 600 }}>{pin.name}</td>
+                    <td style={{ padding: "3px 12px", color: "#1565C0", fontFamily: "monospace", fontWeight: 700 }}>
+                      {primary}
+                      {secondary && <span style={{ fontWeight: 400, color: "#999" }}>{secondary}</span>}
+                    </td>
+                    <td style={{ padding: "3px 4px", color: "#333", fontWeight: 600 }}>{pin.id}</td>
                     <td style={{ padding: "3px 4px", fontFamily: "monospace", color: net ? "#1565C0" : "#bbb" }}>
                       {net ?? "—"}
                     </td>

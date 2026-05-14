@@ -300,7 +300,7 @@ export function SimView() {
   };
 
   return (
-    <div style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column", background: "#1a1a1a", color: "#eee", fontFamily: "sans-serif" }}>
+    <div style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column", background: "#1a1a1a", color: "#eee", fontFamily: "sans-serif", overflow: "hidden" }}>
       {/* Toolbar */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 14px", background: "#222", borderBottom: "1px solid #333", flexShrink: 0, flexWrap: "wrap" }}>
 
@@ -343,7 +343,7 @@ export function SimView() {
       </div>
 
       {/* Body */}
-      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         {/* Probe channel strip */}
         <div style={{ display: "flex", gap: 8, padding: "8px 14px", borderBottom: "1px solid #2a2a2a", flexShrink: 0, flexWrap: "wrap" }}>
           {activeProbes.map((p, i) => (
@@ -372,7 +372,7 @@ export function SimView() {
         </div>
 
         {/* Plot area */}
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", padding: 16 }}>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", padding: "8px 16px", boxSizing: "border-box", overflow: "hidden" }}>
           {!result && !error && (
             <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "#555", fontSize: 14 }}>
               {saveNets.length === 0
@@ -399,8 +399,8 @@ export function SimView() {
                 {showSpice ? "hide SPICE" : "show SPICE"}
               </button>
               {showSpice && (
-                <textarea readOnly value={spiceText} rows={8}
-                  style={{ display: "block", width: "100%", boxSizing: "border-box", marginTop: 4, fontFamily: "monospace", fontSize: 11, background: "#111", color: "#ccc", border: "1px solid #333", borderRadius: 3, resize: "vertical" }} />
+                <textarea readOnly value={spiceText} rows={6}
+                  style={{ display: "block", width: "100%", boxSizing: "border-box", marginTop: 4, fontFamily: "monospace", fontSize: 11, background: "#111", color: "#ccc", border: "1px solid #333", borderRadius: 3, resize: "vertical", maxHeight: 180, overflowY: "auto" }} />
               )}
             </div>
           )}

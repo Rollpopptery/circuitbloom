@@ -7,9 +7,9 @@ export function defaultTemplate(refdes: string, value: string): string {
     case "R": return `R{refdes} {1} {2} ${v ?? "10k"}`;
     case "C": return `C{refdes} {1} {2} ${v ?? "100n"}`;
     case "L": return `L{refdes} {1} {2} ${v ?? "1u"}`;
-    case "D": return `D{refdes} {1} {2} ${v ?? "1N4148"}`;
-    case "Q": return `Q{refdes} {1} {2} {3} ${v ?? "2N3904"}`;
-    case "M": return `M{refdes} {3} {2} {1} {1} ${v ?? "PMOS"}`;
+    case "D": return `D{refdes} {A} {K} ${v ?? "1N4148"}`;
+    case "Q": return `Q{refdes} {C} {B} {E} ${v ?? "2N3904"}`;
+    case "M": return `M{refdes} {D} {G} {S} {S} ${v ?? "NMOS"}`;
     case "V": return `V{refdes} {1} {2} DC ${v ?? "5"}`;
     case "I": return `I{refdes} {1} {2} DC ${v ?? "1m"}`;
     default:  return `X{refdes} {1} {2} ${v ?? "SUBCKT"}`;
@@ -68,7 +68,7 @@ export function validateTemplate(template: string): string | null {
   }
   if (depth > 0) return "Unclosed {";
   for (const [, p] of template.matchAll(/\{([^}]+)\}/g)) {
-    if (p !== "refdes" && !/^\d+$/.test(p)) return `Unknown placeholder: {${p}}`;
+    if (p !== "refdes" && !/^[\w]+$/.test(p)) return `Unknown placeholder: {${p}}`;
   }
   return null;
 }
@@ -76,5 +76,5 @@ export function validateTemplate(template: string): string | null {
 export function previewTemplate(template: string, refdes: string): string {
   return template
     .replace(/\{refdes\}/g, refdes)
-    .replace(/\{(\d+)\}/g, (_, n) => `<net${n}>`);
+    .replace(/\{([^{}]+)\}/g, (_, n) => `<${n}>`);
 }
